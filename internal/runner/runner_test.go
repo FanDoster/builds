@@ -1,0 +1,61 @@
+package runner
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestInjectToken(t *testing.T) {
+	cases := []struct {
+		url, token, want string
+	}{
+		{"https://github.com/u/repo.git", "abc123", "https://abc123@github.com/u/repo.git"},
+		// Special characters must be percent-encoded so the URL stays valid.
+		{"https://github.com/u/repo.git", "a:b@c/d", "https://a%3Ab%40c%2Fd@github.com/u/repo.git"},
+		// Non-HTTP(S) URLs are left untouched.
+		{"git@github.com:u/repo.git", "abc123", "git@github.com:u/repo.git"},
+	}
+	for _, c := range cases {
+		if got := injectToken(c.url, c.token); got != c.want {
+			t.Errorf("injectToken(%q, %q) = %q, want %q", c.url, c.token, got, c.want)
+		}
+	}
+}
+
+func TestScrubSecret(t *testing.T) {
+	out := "fatal: unable to access 'https://tok:en@github.com/u/repo.git/': 403"
+	got := scrubSecret(out, "tok:en")
+	if strings.Contains(got, "tok:en") {
+		t.Errorf("raw secret leaked: %q", got)
+	}
+
+	// The percent-encoded form (as it appears in an injected URL) must also be masked.
+	encoded := "fatal: unable to access 'https://tok%3Aen@github.com/u/repo.git/'"
+	got = scrubSecret(encoded, "tok:en")
+	if strings.Contains(got, "tok%3Aen") {
+		t.Errorf("encoded secret leaked: %q", got)
+	}
+
+	// Empty secret is a no-op.
+	if got := scrubSecret("unchanged", ""); got != "unchanged" {
+		t.Errorf("empty secret altered output: %q", got)
+	}
+}
+
+func TestResolveDockerfile(t *testing.T) {
+	workDir := t.TempDir()
+
+	ok := []string{"Dockerfile", "docker/Dockerfile", "./sub/../Dockerfile"}
+	for _, p := range ok {
+		if _, err := resolveDockerfile(workDir, p); err != nil {
+			t.Errorf("resolveDockerfile(%q) unexpectedly rejected: %v", p, err)
+		}
+	}
+
+	bad := []string{"../outside/Dockerfile", "../../etc/passwd", "sub/../../escape"}
+	for _, p := range bad {
+		if _, err := resolveDockerfile(workDir, p); err == nil {
+			t.Errorf("resolveDockerfile(%q) should have been rejected", p)
+		}
+	}
+}

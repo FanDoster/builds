@@ -3,9 +3,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Auto-refresh build detail page
   const logViewer = document.getElementById('build-log');
   if (logViewer && logViewer.dataset.status === 'running') {
-    const buildId = logViewer.dataset.buildId;
+    // data-api-url includes the configured base path (BUILDS_BASE_PATH)
+    const apiUrl = logViewer.dataset.apiUrl || ('/api/builds/' + logViewer.dataset.buildId);
     const poll = () => {
-      fetch('/api/builds/' + buildId)
+      fetch(apiUrl)
         .then(r => r.json())
         .then(build => {
           logViewer.textContent = build.log;

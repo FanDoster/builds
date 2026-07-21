@@ -28,7 +28,7 @@
       <td class="meta">{{.CommitSHA}}</td>
       <td>{{.CommitMessage}}</td>
       <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
-      <td class="meta">{{if .FinishedAt}}{{.FinishedAt.Sub .StartedAt | printf "%.0fs"}}{{end}}</td>
+      <td class="meta">{{.Duration}}</td>
       <td><a href="{{$.BasePath}}/builds/{{.ID}}" class="btn">Logs</a></td>
     </tr>
     {{else}}

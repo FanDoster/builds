@@ -51,8 +51,16 @@ func (h *Handler) render(w http.ResponseWriter, name string, data map[string]int
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
-	projects, _ := h.DB.ListProjects()
-	builds, _ := h.DB.ListRecentBuilds(10)
+	projects, err := h.DB.ListProjects()
+	if err != nil {
+		http.Error(w, "failed to load projects: "+err.Error(), 500)
+		return
+	}
+	builds, err := h.DB.ListRecentBuilds(10)
+	if err != nil {
+		http.Error(w, "failed to load builds: "+err.Error(), 500)
+		return
+	}
 	h.render(w, "index", map[string]interface{}{
 		"Title":    "Builds",
 		"Projects": projects,
@@ -71,7 +79,11 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project not found", 404)
 		return
 	}
-	builds, _ := h.DB.ListBuildsByProject(id, 0)
+	builds, err := h.DB.ListBuildsByProject(id, 0)
+	if err != nil {
+		http.Error(w, "failed to load builds: "+err.Error(), 500)
+		return
+	}
 	h.render(w, "project", map[string]interface{}{
 		"Title":   project.Name,
 		"Project": project,

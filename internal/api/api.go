@@ -1,8 +1,12 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +14,9 @@ import (
 	"github.com/FanDoster/builds/internal/db"
 	"github.com/FanDoster/builds/internal/models"
 )
+
+// maxWebhookBody caps webhook payload reads (GitHub push payloads are far smaller).
+const maxWebhookBody = 1 << 20
 
 type Server struct {
 	DB       *db.DB
@@ -127,40 +134,49 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var updates models.Project
+	// Pointer fields distinguish "not provided" (nil, keep current value)
+	// from "provided as empty" (clear the value where that is allowed).
+	var updates struct {
+		Name              *string `json:"name"`
+		RepoURL           *string `json:"repo_url"`
+		Branch            *string `json:"branch"`
+		DockerfilePath    *string `json:"dockerfile_path"`
+		ImageName         *string `json:"image_name"`
+		DeployComposePath *string `json:"deploy_compose_path"`
+		DeployServiceName *string `json:"deploy_service_name"`
+		WebhookSecret     *string `json:"webhook_secret"`
+		CloneToken        *string `json:"clone_token"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
 
-	// Merge updates into existing
-	if updates.Name != "" {
-		existing.Name = updates.Name
+	// Required fields may be updated but not cleared.
+	for field, v := range map[string]*string{
+		"name": updates.Name, "repo_url": updates.RepoURL, "branch": updates.Branch,
+		"dockerfile_path": updates.DockerfilePath, "image_name": updates.ImageName,
+	} {
+		if v != nil && *v == "" {
+			writeError(w, 400, field+" cannot be empty")
+			return
+		}
 	}
-	if updates.RepoURL != "" {
-		existing.RepoURL = updates.RepoURL
+
+	setIf := func(dst *string, src *string) {
+		if src != nil {
+			*dst = *src
+		}
 	}
-	if updates.Branch != "" {
-		existing.Branch = updates.Branch
-	}
-	if updates.DockerfilePath != "" {
-		existing.DockerfilePath = updates.DockerfilePath
-	}
-	if updates.ImageName != "" {
-		existing.ImageName = updates.ImageName
-	}
-	if updates.DeployComposePath != "" || r.FormValue("clear_compose") == "true" {
-		existing.DeployComposePath = updates.DeployComposePath
-	}
-	if updates.DeployServiceName != "" || r.FormValue("clear_service") == "true" {
-		existing.DeployServiceName = updates.DeployServiceName
-	}
-	if updates.WebhookSecret != "" {
-		existing.WebhookSecret = updates.WebhookSecret
-	}
-	if updates.CloneToken != "" {
-		existing.CloneToken = updates.CloneToken
-	}
+	setIf(&existing.Name, updates.Name)
+	setIf(&existing.RepoURL, updates.RepoURL)
+	setIf(&existing.Branch, updates.Branch)
+	setIf(&existing.DockerfilePath, updates.DockerfilePath)
+	setIf(&existing.ImageName, updates.ImageName)
+	setIf(&existing.DeployComposePath, updates.DeployComposePath)
+	setIf(&existing.DeployServiceName, updates.DeployServiceName)
+	setIf(&existing.WebhookSecret, updates.WebhookSecret)
+	setIf(&existing.CloneToken, updates.CloneToken)
 
 	if err := s.DB.UpdateProject(existing); err != nil {
 		writeError(w, 500, err.Error())
@@ -210,10 +226,24 @@ func (s *Server) handleTriggerBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Queue the build
-	s.BuildCh <- build
+	if !s.enqueue(build) {
+		writeError(w, 503, "build queue is full, try again later")
+		return
+	}
 
 	writeJSON(w, 201, build)
+}
+
+// enqueue attempts a non-blocking send to the build channel. On a full queue
+// it marks the build failed rather than blocking the HTTP handler forever.
+func (s *Server) enqueue(build *models.Build) bool {
+	select {
+	case s.BuildCh <- build:
+		return true
+	default:
+		s.DB.UpdateBuildStatus(build.ID, models.StatusFailed, "Build not started: queue is full\n")
+		return false
+	}
 }
 
 func (s *Server) handleListProjectBuilds(w http.ResponseWriter, r *http.Request) {
@@ -269,20 +299,33 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Keep the raw body: signature validation is HMAC over the exact bytes.
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody))
+	if err != nil {
+		writeError(w, 400, "failed to read payload")
+		return
+	}
+
 	var payload struct {
 		Ref        string `json:"ref"`
 		Repository struct {
 			CloneURL string `json:"clone_url"`
 			FullName string `json:"full_name"`
 		} `json:"repository"`
-		HeadCommit struct {
+		HeadCommit *struct {
 			ID      string `json:"id"`
 			Message string `json:"message"`
 		} `json:"head_commit"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		writeError(w, 400, "invalid payload")
+		return
+	}
+
+	// Branch deletions and some tag pushes have no head_commit.
+	if payload.HeadCommit == nil || payload.HeadCommit.ID == "" {
+		writeJSON(w, 200, map[string]string{"status": "ignored", "reason": "no head_commit in payload"})
 		return
 	}
 
@@ -293,18 +336,38 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	signature := r.Header.Get("X-Hub-Signature-256")
 	branch := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	var matched []models.Project
+	rejected := 0
 	for _, p := range projects {
-		if p.Branch == branch && repoURLMatch(p.RepoURL, payload.Repository.CloneURL) {
-			// TODO: validate X-Hub-Signature-256 against p.WebhookSecret
-			matched = append(matched, p)
+		if p.Branch != branch || !repoURLMatch(p.RepoURL, payload.Repository.CloneURL) {
+			continue
 		}
+		// ListProjects omits secrets; fetch the full row for validation.
+		full, err := s.DB.GetProject(p.ID)
+		if err != nil {
+			continue
+		}
+		if full.WebhookSecret != "" && !validSignature(full.WebhookSecret, body, signature) {
+			rejected++
+			continue
+		}
+		matched = append(matched, *full)
 	}
 
 	if len(matched) == 0 {
+		if rejected > 0 {
+			writeError(w, 403, "invalid webhook signature")
+			return
+		}
 		writeJSON(w, 200, map[string]string{"status": "ignored", "reason": "no matching project"})
 		return
+	}
+
+	sha := payload.HeadCommit.ID
+	if len(sha) > 12 {
+		sha = sha[:12]
 	}
 
 	var created []int64
@@ -312,14 +375,16 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		build := &models.Build{
 			ProjectID:     project.ID,
 			Status:        models.StatusPending,
-			CommitSHA:     payload.HeadCommit.ID[:12],
+			CommitSHA:     sha,
 			CommitMessage: truncate(payload.HeadCommit.Message, 100),
 		}
 		if err := s.DB.CreateBuild(build); err != nil {
 			continue
 		}
+		if !s.enqueue(build) {
+			continue
+		}
 		created = append(created, build.ID)
-		s.BuildCh <- build
 	}
 
 	writeJSON(w, 200, map[string]interface{}{
@@ -327,6 +392,14 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		"builds":  created,
 		"project": matched[0].Name,
 	})
+}
+
+// validSignature checks a GitHub X-Hub-Signature-256 header (constant-time).
+func validSignature(secret string, body []byte, sigHeader string) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(sigHeader))
 }
 
 func repoURLMatch(configured, webhook string) bool {
@@ -340,10 +413,16 @@ func repoURLMatch(configured, webhook string) bool {
 	return norm(configured) == norm(webhook)
 }
 
+// truncate returns the first line of s, capped at n runes (not bytes, so
+// multi-byte characters are never split).
 func truncate(s string, n int) string {
 	s = strings.SplitN(s, "\n", 2)[0]
-	if len(s) > n {
-		return s[:n-3] + "..."
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
 	}
-	return s
+	if n <= 3 {
+		return string(runes[:n])
+	}
+	return string(runes[:n-3]) + "..."
 }

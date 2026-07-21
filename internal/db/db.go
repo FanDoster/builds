@@ -245,6 +245,30 @@ func (d *DB) ListRecentBuilds(limit int) ([]models.Build, error) {
 	return builds, rows.Err()
 }
 
+func (d *DB) ListBuildsByStatus(status models.BuildStatus) ([]models.Build, error) {
+	rows, err := d.conn.Query(
+		`SELECT b.id, b.project_id, p.name, b.status, b.commit_sha, b.commit_message, b.log, b.started_at, b.finished_at, b.created_at
+		 FROM builds b JOIN projects p ON p.id = b.project_id
+		 WHERE b.status = ?
+		 ORDER BY b.created_at ASC`, status,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var builds []models.Build
+	for rows.Next() {
+		var b models.Build
+		if err := rows.Scan(&b.ID, &b.ProjectID, &b.ProjectName, &b.Status, &b.CommitSHA, &b.CommitMessage,
+			&b.Log, &b.StartedAt, &b.FinishedAt, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		builds = append(builds, b)
+	}
+	return builds, rows.Err()
+}
+
 func (d *DB) UpdateBuildStatus(id int64, status models.BuildStatus, log string) error {
 	now := time.Now().UTC()
 	var started, finished *time.Time

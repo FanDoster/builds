@@ -44,3 +44,13 @@ type Build struct {
 	FinishedAt    *time.Time  `json:"finished_at"`
 	CreatedAt     time.Time   `json:"created_at"`
 }
+
+// Duration returns a human-readable build duration, or "" if the build
+// hasn't both started and finished. Value receiver so it is callable on
+// range variables in templates.
+func (b Build) Duration() string {
+	if b.StartedAt == nil || b.FinishedAt == nil {
+		return ""
+	}
+	return b.FinishedAt.Sub(*b.StartedAt).Round(time.Second).String()
+}

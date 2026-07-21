@@ -23,5 +23,6 @@
 <h2>Build Log</h2>
 <div class="log-viewer" id="build-log"
      data-build-id="{{.Build.ID}}"
+     data-api-url="{{$.BasePath}}/api/builds/{{.Build.ID}}"
      data-status="{{.Build.Status}}">{{.Build.Log}}</div>
 {{end}}

@@ -43,26 +43,33 @@ type Runner struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// JanitorInterval is how often stale 'running' rows (left by crashes or
+	// killed processes) are swept to failed. Exposed for tests.
+	JanitorInterval time.Duration
+
 	mu            sync.Mutex
 	currentID     int64
+	currentStep   string
 	cancelCurrent context.CancelCauseFunc
 }
 
 func New(database *db.DB, jobs <-chan *models.Build, bus *logbus.Bus) *Runner {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	return &Runner{
-		DB:      database,
-		Jobs:    jobs,
-		Bus:     bus,
-		Timeout: DefaultBuildTimeout,
-		ctx:     ctx,
-		cancel:  func() { cancel(context.Canceled) },
+		DB:              database,
+		Jobs:            jobs,
+		Bus:             bus,
+		Timeout:         DefaultBuildTimeout,
+		JanitorInterval: 30 * time.Second,
+		ctx:             ctx,
+		cancel:          func() { cancel(context.Canceled) },
 	}
 }
 
 func (r *Runner) Start() {
-	r.wg.Add(1)
+	r.wg.Add(2)
 	go r.loop()
+	go r.janitor()
 }
 
 // Stop cancels any in-flight build and waits for the worker to exit.
@@ -81,6 +88,63 @@ func (r *Runner) Cancel(id int64) bool {
 		return true
 	}
 	return false
+}
+
+// Progress reports the step the worker is currently executing for build id.
+// ok is false when id is not the build being processed right now.
+func (r *Runner) Progress(id int64) (step string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentID == id {
+		return r.currentStep, true
+	}
+	return "", false
+}
+
+func (r *Runner) setStep(step string) {
+	r.mu.Lock()
+	r.currentStep = step
+	r.mu.Unlock()
+}
+
+// janitor periodically sweeps stale 'running' rows — builds a crashed or
+// killed process left behind — so history never shows phantom running
+// builds until the next restart. Single-worker invariant: any running row
+// that isn't the current build is stale. (Do not run two server processes
+// against one DB; their janitors would fail each other's builds.)
+func (r *Runner) janitor() {
+	defer r.wg.Done()
+	ticker := time.NewTicker(r.JanitorInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			r.SweepStale()
+		}
+	}
+}
+
+// SweepStale runs one janitor pass. Returns the ids it failed.
+//
+// The registry lock is held for the whole sweep: releasing it after reading
+// currentID would let the worker register-and-claim a build inside the
+// window, and the sweep would kill that live build. Holding mu serializes
+// the sweep against registration — a build is either still pending (not
+// swept) or already registered as current (excluded).
+func (r *Runner) SweepStale() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids, err := r.DB.FailStaleRunning(r.currentID)
+	if err != nil {
+		return nil
+	}
+	for _, id := range ids {
+		// Close any open topic/subscribers; finished time is unknown.
+		r.Bus.PublishStatus(id, models.StatusFailed, nil, nil)
+	}
+	return ids
 }
 
 func (r *Runner) loop() {
@@ -110,6 +174,7 @@ func (r *Runner) process(build *models.Build) {
 	defer func() {
 		r.mu.Lock()
 		r.currentID = 0
+		r.currentStep = ""
 		r.cancelCurrent = nil
 		r.mu.Unlock()
 	}()
@@ -147,6 +212,7 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 		fmt.Fprintf(sink, "[%s] %s\n", time.Now().UTC().Format("15:04:05"), msg)
 	}
 	stepStart := func(id, detail string) {
+		r.setStep(id)
 		logStep("##[step:" + id + "] " + detail)
 	}
 	// fail terminates the build; a user cancel takes precedence over the
@@ -212,8 +278,11 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 	// Step 2: Docker build
 	imageTag := fmt.Sprintf("registry.fandoster.com/%s:latest", project.ImageName)
 
+	// No --progress flag: legacy (non-BuildKit) docker rejects it with exit
+	// 125, and BuildKit already falls back to plain progress when stdout is
+	// not a TTY — which a pipe to the log sink never is.
 	stepStart("build", "Building Docker image: "+imageTag)
-	buildCmd := newCmd(ctx, sink, "docker", "build", "--progress=plain", "-t", imageTag, "-f", dockerfile, workDir)
+	buildCmd := newCmd(ctx, sink, "docker", "build", "-t", imageTag, "-f", dockerfile, workDir)
 	if err := buildCmd.Run(); err != nil {
 		fail(fmt.Sprintf("Docker build failed: %v%s", err, timeoutHint(ctx)))
 		return

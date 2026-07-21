@@ -23,12 +23,12 @@
   </thead>
   <tbody>
     {{range .Builds}}
-    <tr>
+    <tr data-live-build="{{.ID}}" data-status="{{.Status}}">
       <td><a href="{{$.BasePath}}/builds/{{.ID}}">{{.ID}}</a></td>
       <td class="meta">{{.CommitSHA}}</td>
       <td>{{.CommitMessage}}</td>
       <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
-      <td class="meta">{{.Duration}}</td>
+      <td class="meta build-dur">{{.Duration}}</td>
       <td><a href="{{$.BasePath}}/builds/{{.ID}}" class="btn">Logs</a></td>
     </tr>
     {{else}}

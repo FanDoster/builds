@@ -50,9 +50,12 @@ type Build struct {
 	FinishedAt    *time.Time  `json:"finished_at"`
 	CreatedAt     time.Time   `json:"created_at"`
 
-	// Computed, never stored. Populated only for ?meta=1 API responses.
-	LogLen        int64 `json:"log_len,omitempty"`
-	QueuePosition int   `json:"queue_position,omitempty"`
+	// Computed, never stored. Populated only for ?meta=1 and /builds/active
+	// API responses.
+	LogLen        int64  `json:"log_len,omitempty"`
+	QueuePosition int    `json:"queue_position,omitempty"`
+	CurrentStep   string `json:"current_step,omitempty"`
+	ExpectedSecs  int64  `json:"expected_secs,omitempty"`
 }
 
 // Duration returns a human-readable build duration, or "" if the build

@@ -308,6 +308,97 @@ func (d *DB) FinishBuild(id int64, status models.BuildStatus) error {
 	return err
 }
 
+// FailStaleRunning marks every running build except exceptID as failed.
+// finished_at is deliberately left untouched (NULL): the build's real end
+// time is unknowable, and stamping "now" poisons history durations. With a
+// single worker, any running row that isn't the current build is stale by
+// definition (crash, SIGKILL, or an abandoned process).
+func (d *DB) FailStaleRunning(exceptID int64) ([]int64, error) {
+	rows, err := d.conn.Query(
+		`SELECT id FROM builds WHERE status=? AND id != ?`, models.StatusRunning, exceptID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var failed []int64
+	for _, id := range ids {
+		res, err := d.conn.Exec(
+			`UPDATE builds SET status=?, log = log || ? WHERE id=? AND status=?`,
+			models.StatusFailed,
+			"\n[ERROR] Build interrupted by server restart\n",
+			id, models.StatusRunning,
+		)
+		if err != nil {
+			continue
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			failed = append(failed, id)
+		}
+	}
+	return failed, nil
+}
+
+// RepairInterruptedDurations fixes rows swept by older code, which stamped
+// finished_at with the restart time and produced absurd history durations.
+// Idempotent; new sweeps leave finished_at NULL from the start.
+func (d *DB) RepairInterruptedDurations() (int64, error) {
+	res, err := d.conn.Exec(
+		`UPDATE builds SET finished_at=NULL
+		 WHERE status=? AND finished_at IS NOT NULL
+		   AND log LIKE '%[ERROR] Build interrupted by server restart%'`,
+		models.StatusFailed,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ExpectedDuration estimates how long the project's next build should take:
+// the mean of its last five successful build durations.
+func (d *DB) ExpectedDuration(projectID int64) (time.Duration, bool) {
+	rows, err := d.conn.Query(
+		`SELECT started_at, finished_at FROM builds
+		 WHERE project_id=? AND status=? AND started_at IS NOT NULL AND finished_at IS NOT NULL
+		 ORDER BY id DESC LIMIT 5`, projectID, models.StatusSuccess,
+	)
+	if err != nil {
+		return 0, false
+	}
+	defer rows.Close()
+
+	var total time.Duration
+	n := 0
+	for rows.Next() {
+		var started, finished time.Time
+		if err := rows.Scan(&started, &finished); err != nil {
+			return 0, false
+		}
+		if d := finished.Sub(started); d > 0 {
+			total += d
+			n++
+		}
+	}
+	if n == 0 || rows.Err() != nil {
+		return 0, false
+	}
+	return total / time.Duration(n), true
+}
+
 // QueuePosition returns a pending build's 1-based position in the run order:
 // pending builds ahead of it (lower id) plus one slot for any running build.
 func (d *DB) QueuePosition(id int64) (int, error) {

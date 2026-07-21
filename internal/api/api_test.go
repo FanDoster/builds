@@ -35,15 +35,23 @@ func newTestServer(t *testing.T) (*Server, *http.ServeMux) {
 	return s, mux
 }
 
-// fakeCanceler records Cancel calls and returns a scripted answer.
+// fakeCanceler records Cancel calls and returns scripted answers.
 type fakeCanceler struct {
 	got    []int64
 	answer bool
+	step   string // Progress() step for any id when non-empty
 }
 
 func (f *fakeCanceler) Cancel(id int64) bool {
 	f.got = append(f.got, id)
 	return f.answer
+}
+
+func (f *fakeCanceler) Progress(id int64) (string, bool) {
+	if f.step == "" {
+		return "", false
+	}
+	return f.step, true
 }
 
 func createProject(t *testing.T, s *Server, p models.Project) *models.Project {
@@ -742,5 +750,53 @@ func TestAsciiFilename(t *testing.T) {
 		if got := asciiFilename(in); got != want {
 			t.Errorf("asciiFilename(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestActiveBuildsEndpoint(t *testing.T) {
+	s, mux := newTestServer(t)
+	s.Runner = &fakeCanceler{step: "push"}
+	_, running := seedBuild(t, s, models.StatusRunning, "some log text")
+	_, pend1 := seedBuild(t, s, models.StatusPending, "")
+	_, pend2 := seedBuild(t, s, models.StatusPending, "")
+	seedBuild(t, s, models.StatusSuccess, "done") // terminal: must not appear
+
+	w := doJSON(t, mux, "GET", "/api/builds/active", nil)
+	if w.Code != 200 {
+		t.Fatalf("active: got %d: %s", w.Code, w.Body)
+	}
+	var list []models.Build
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 3 {
+		t.Fatalf("expected 3 active builds, got %d: %s", len(list), w.Body)
+	}
+	byID := map[int64]models.Build{}
+	for _, b := range list {
+		byID[b.ID] = b
+		if b.Log != "" {
+			t.Errorf("active list leaked a log body for build %d", b.ID)
+		}
+	}
+	if got := byID[running.ID]; got.Status != models.StatusRunning || got.CurrentStep != "push" {
+		t.Errorf("running build wrong: %+v", got)
+	}
+	if got := byID[pend1.ID]; got.QueuePosition < 2 {
+		t.Errorf("first pending queue_position = %d, want >= 2 (running ahead)", got.QueuePosition)
+	}
+	if a, b := byID[pend1.ID].QueuePosition, byID[pend2.ID].QueuePosition; b != a+1 {
+		t.Errorf("queue positions not consecutive: %d then %d", a, b)
+	}
+}
+
+func TestGetBuildMetaIncludesProgress(t *testing.T) {
+	s, mux := newTestServer(t)
+	s.Runner = &fakeCanceler{step: "build"}
+	_, running := seedBuild(t, s, models.StatusRunning, "")
+
+	w := doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d?meta=1", running.ID), nil)
+	var got models.Build
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if got.CurrentStep != "build" {
+		t.Errorf("current_step = %q, want build", got.CurrentStep)
 	}
 }

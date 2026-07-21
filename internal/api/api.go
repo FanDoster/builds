@@ -21,16 +21,18 @@ import (
 // maxWebhookBody caps webhook payload reads (GitHub push payloads are far smaller).
 const maxWebhookBody = 1 << 20
 
-// BuildCanceler cancels the in-flight build (implemented by runner.Runner).
-type BuildCanceler interface {
+// RunnerControl is the runner surface the API needs (implemented by
+// runner.Runner): canceling the in-flight build and reading its progress.
+type RunnerControl interface {
 	Cancel(buildID int64) bool
+	Progress(buildID int64) (step string, ok bool)
 }
 
 type Server struct {
 	DB       *db.DB
 	BuildCh  chan *models.Build
 	Bus      *logbus.Bus
-	Runner   BuildCanceler
+	Runner   RunnerControl
 	BasePath string // e.g. "/builds"
 }
 
@@ -60,6 +62,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/projects/{id}/build", s.handleTriggerBuild)
 	mux.HandleFunc("GET /api/projects/{id}/builds", s.handleListProjectBuilds)
 	mux.HandleFunc("GET /api/builds", s.handleListRecentBuilds)
+	mux.HandleFunc("GET /api/builds/active", s.handleActiveBuilds)
 	mux.HandleFunc("GET /api/builds/{id}", s.handleGetBuild)
 	mux.HandleFunc("GET /api/builds/{id}/events", s.handleBuildEvents)
 	mux.HandleFunc("GET /api/builds/{id}/log", s.handleBuildLog)
@@ -326,8 +329,53 @@ func (s *Server) handleGetBuild(w http.ResponseWriter, r *http.Request) {
 				build.QueuePosition = pos
 			}
 		}
+		s.decorateProgress(build)
 	}
 	writeJSON(w, 200, build)
+}
+
+// decorateProgress fills the live-progress fields for an active build: the
+// step the runner is on and the expected duration from recent history.
+func (s *Server) decorateProgress(b *models.Build) {
+	if b.Status != models.StatusRunning && b.Status != models.StatusPending {
+		return
+	}
+	if b.Status == models.StatusRunning && s.Runner != nil {
+		if step, ok := s.Runner.Progress(b.ID); ok {
+			b.CurrentStep = step
+		}
+	}
+	if d, ok := s.DB.ExpectedDuration(b.ProjectID); ok {
+		b.ExpectedSecs = int64(d.Seconds() + 0.5)
+	}
+}
+
+// handleActiveBuilds returns all pending and running builds, log-free, with
+// live progress — one cheap request for list pages to poll.
+func (s *Server) handleActiveBuilds(w http.ResponseWriter, r *http.Request) {
+	running, err := s.DB.ListBuildsByStatus(models.StatusRunning)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	pending, err := s.DB.ListBuildsByStatus(models.StatusPending)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	active := make([]models.Build, 0, len(running)+len(pending))
+	for _, b := range append(running, pending...) {
+		b.Log = ""
+		if b.Status == models.StatusPending {
+			if pos, err := s.DB.QueuePosition(b.ID); err == nil {
+				b.QueuePosition = pos
+			}
+		}
+		s.decorateProgress(&b)
+		active = append(active, b)
+	}
+	writeJSON(w, 200, active)
 }
 
 // handleBuildLog serves the raw scrubbed log: full text, ?download=1

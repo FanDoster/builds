@@ -24,7 +24,7 @@
   <div>
     <h2 style="margin-top:0">Recent Builds</h2>
     {{range .Builds}}
-    <div class="card">
+    <div class="card" data-live-build="{{.ID}}" data-status="{{.Status}}">
       <div class="card-header">
         <div>
           <a href="{{$.BasePath}}/builds/{{.ID}}" class="card-title">{{.ProjectName}} #{{.ID}}</a>
@@ -35,6 +35,7 @@
       {{if .StartedAt}}
       <div class="meta">{{.StartedAt.Format "Jan 02 15:04"}}</div>
       {{end}}
+      <div class="meta build-dur"></div>
     </div>
     {{else}}
     <div class="card"><p class="meta">No builds yet.</p></div>

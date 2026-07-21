@@ -97,7 +97,7 @@ func TestRunBuildSuccessEmitsGrammar(t *testing.T) {
 		"##[step:build] Building Docker image:",
 		"##[step:push] Pushing image:",
 		"BUILD SUCCESS",
-		"stub docker build --progress=plain",
+		"stub docker build -t registry.fandoster.com/app:latest",
 	} {
 		if !strings.Contains(got.Log, want) {
 			t.Errorf("log missing %q; log:\n%s", want, got.Log)
@@ -240,4 +240,61 @@ func TestBuildTimeout(t *testing.T) {
 	if !strings.Contains(got.Log, "(build timed out)") {
 		t.Errorf("log missing timeout hint:\n%s", got.Log)
 	}
+}
+
+// The janitor must sweep running rows that are not the current build and
+// leave the in-flight one alone; Progress must report the current step.
+func TestJanitorSweepsStaleAndProgressReports(t *testing.T) {
+	env, build := newTestEnv(t)
+
+	// A stale running row from a "crashed" process.
+	stale := &models.Build{ProjectID: build.ProjectID, Status: models.StatusPending}
+	if err := env.db.CreateBuild(stale); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := env.db.ClaimBuild(stale.ID); !ok {
+		t.Fatal("claim stale")
+	}
+
+	t.Setenv("DOCKER_STUB_SLEEP", "30")
+	done := make(chan struct{})
+	go func() {
+		env.r.process(build)
+		close(done)
+	}()
+
+	// Wait for the real build to be mid-docker-build.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		tail, _, _ := env.bus.LogTail(build.ID, 0)
+		if strings.Contains(string(tail), "##[step:build]") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("build step never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if step, ok := env.r.Progress(build.ID); !ok || step != "build" {
+		t.Errorf("Progress = %q,%v want build,true", step, ok)
+	}
+	if _, ok := env.r.Progress(stale.ID); ok {
+		t.Error("Progress should not report for a non-current build")
+	}
+
+	swept := env.r.SweepStale()
+	if len(swept) != 1 || swept[0] != stale.ID {
+		t.Fatalf("swept = %v, want [%d]", swept, stale.ID)
+	}
+	got, _ := env.db.GetBuild(stale.ID)
+	if got.Status != models.StatusFailed || got.FinishedAt != nil {
+		t.Errorf("stale after sweep: status=%s finished=%v", got.Status, got.FinishedAt)
+	}
+	// The live build must be untouched and cancelable.
+	if cur, _ := env.db.GetBuild(build.ID); cur.Status != models.StatusRunning {
+		t.Fatalf("current build swept: %s", cur.Status)
+	}
+	env.r.Cancel(build.ID)
+	<-done
 }

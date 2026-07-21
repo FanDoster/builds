@@ -10,7 +10,102 @@
   document.addEventListener('DOMContentLoaded', function () {
     initTriggerButton();
     initBuildPage();
+    initListLive();
   });
+
+  // Shared: compact duration like "40s" / "1m40s" / "1h05m".
+  function fmtShort(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return sec + 's';
+    var m = Math.floor(sec / 60), s = sec % 60;
+    if (m < 60) return m + 'm' + (s < 10 ? '0' : '') + s + 's';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return h + 'h' + (m < 10 ? '0' : '') + m + 'm';
+  }
+
+  var STEP_NAMES = { clone: 'Clone', checkout: 'Checkout', build: 'Build', push: 'Push', deploy: 'Deploy' };
+
+  // --- Dashboard / project pages: live badges, current step, ETA ---
+  function initListLive() {
+    var els = document.querySelectorAll('[data-live-build]');
+    if (!els.length) return;
+
+    var map = {}, tracked = {};
+    var anyActive = false;
+    Array.prototype.forEach.call(els, function (el) {
+      map[el.dataset.liveBuild] = el;
+      var st = el.dataset.status;
+      if (st === 'running' || st === 'pending') {
+        anyActive = true;
+        tracked[el.dataset.liveBuild] = true;
+      }
+    });
+    if (!anyActive) return;
+
+    var base = document.body.dataset.basePath || '';
+
+    function setBadge(el, status) {
+      var b = el.querySelector('.badge');
+      if (b) {
+        b.className = 'badge badge-' + status;
+        b.textContent = status;
+      }
+      el.dataset.status = status;
+    }
+
+    function finalize(id, el) {
+      fetch(base + '/api/builds/' + id + '?meta=1')
+        .then(function (r) { return r.json(); })
+        .then(function (meta) {
+          setBadge(el, meta.status);
+          var d = el.querySelector('.build-dur');
+          if (d) {
+            d.textContent = (meta.started_at && meta.finished_at)
+              ? fmtShort((new Date(meta.finished_at) - new Date(meta.started_at)) / 1000)
+              : '';
+          }
+        })
+        .catch(function () {});
+    }
+
+    function tick() {
+      fetch(base + '/api/builds/active')
+        .then(function (r) { return r.json(); })
+        .then(function (list) {
+          var present = {};
+          var now = Date.now();
+          (list || []).forEach(function (a) {
+            present[a.id] = true;
+            var el = map[a.id];
+            if (!el) return;
+            tracked[a.id] = true;
+            setBadge(el, a.status);
+            var d = el.querySelector('.build-dur');
+            if (!d) return;
+            if (a.status === 'running') {
+              var elapsed = a.started_at ? (now - new Date(a.started_at).getTime()) / 1000 : 0;
+              var txt = (a.current_step ? (STEP_NAMES[a.current_step] || a.current_step) + ' · ' : '') + fmtShort(elapsed);
+              if (a.expected_secs) txt += ' / ~' + fmtShort(a.expected_secs);
+              d.textContent = txt;
+            } else {
+              d.textContent = a.queue_position >= 2 ? 'queued · #' + a.queue_position : 'queued';
+            }
+          });
+          // Builds we were tracking that left the active set → final state.
+          Object.keys(tracked).forEach(function (id) {
+            if (present[id]) return;
+            delete tracked[id];
+            if (map[id]) finalize(id, map[id]);
+          });
+          if (Object.keys(tracked).length) setTimeout(tick, 4000);
+        })
+        .catch(function () {
+          if (Object.keys(tracked).length) setTimeout(tick, 8000);
+        });
+    }
+    tick();
+  }
 
   // --- Project page: trigger button ---
   function initTriggerButton() {
@@ -90,7 +185,7 @@
       progScroll: false,
       es: null, esErrors: 0, esGotEvent: false,
       poller: null, metaPoller: null, watchdog: null,
-      ticker: null,
+      ticker: null, expectedSecs: 0,
       rafScheduled: false, lastFlush: 0, flushTimer: null,
       lastFavColor: null,
     };
@@ -483,10 +578,33 @@
       if (state.startedAt && state.finishedAt) {
         metaDuration.textContent = fmtElapsed(state.finishedAt - state.startedAt);
       } else if (state.startedAt && state.status === 'running') {
-        metaDuration.textContent = fmtElapsed(Date.now() - state.startedAt.getTime());
+        var elapsedMs = Date.now() - state.startedAt.getTime();
+        var txt = fmtElapsed(elapsedMs);
+        if (state.expectedSecs > 0) {
+          if (elapsedMs / 1000 <= state.expectedSecs * 1.15) {
+            txt += ' / ~' + fmtElapsed(state.expectedSecs * 1000);
+          } else {
+            txt += ' · usually ' + fmtElapsed(state.expectedSecs * 1000);
+          }
+          metaDuration.title = 'Estimate from the last successful builds';
+        }
+        metaDuration.textContent = txt;
       } else {
         metaDuration.textContent = '—';
       }
+    }
+
+    // Pull the expected duration (mean of recent successful builds) once
+    // per running phase; the ticker then renders elapsed vs expected.
+    function fetchExpected() {
+      if (state.status !== 'running') return;
+      fetch(ds.apiUrl + '?meta=1')
+        .then(function (r) { return r.json(); })
+        .then(function (meta) {
+          state.expectedSecs = meta.expected_secs || 0;
+          updateDuration();
+        })
+        .catch(function () {});
     }
 
     function manageTicker() {
@@ -558,6 +676,7 @@
       if (d.status === 'running' && prev === 'pending') {
         tglFollow.hidden = false;
         setFollow(true); // watch the log as soon as the queued build starts
+        fetchExpected();
       }
       if (state.startedAt && metaStarted) {
         metaStarted.setAttribute('datetime', state.startedAt.toISOString());
@@ -953,6 +1072,7 @@
     if (!isTerminal(state.status)) {
       connectSSE();
       startMetaPoll();
+      fetchExpected();
     }
 
     // #L123 anchor

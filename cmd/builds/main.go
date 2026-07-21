@@ -92,13 +92,19 @@ func main() {
 // recoverOrphanedBuilds marks builds that were mid-flight during a previous
 // crash/restart as failed, and re-queues builds that never started.
 func recoverOrphanedBuilds(database *db.DB, buildCh chan *models.Build) {
-	interrupted, err := database.ListBuildsByStatus(models.StatusRunning)
+	// finished_at stays NULL for interrupted builds — the real end time is
+	// unknown, and stamping the restart time poisons history durations.
+	interrupted, err := database.FailStaleRunning(0)
 	if err != nil {
-		log.Printf("Recovery: failed to list running builds: %v", err)
+		log.Printf("Recovery: failed to sweep running builds: %v", err)
 	}
-	for _, b := range interrupted {
-		database.UpdateBuildStatus(b.ID, models.StatusFailed, b.Log+"\n[ERROR] Build interrupted by server restart\n")
-		log.Printf("Recovery: marked build %d failed (interrupted by restart)", b.ID)
+	for _, id := range interrupted {
+		log.Printf("Recovery: marked build %d failed (interrupted by restart)", id)
+	}
+	// One-time repair of rows swept by older code, which stamped finished_at
+	// with the restart time.
+	if n, err := database.RepairInterruptedDurations(); err == nil && n > 0 {
+		log.Printf("Recovery: cleared bogus finish times on %d interrupted builds", n)
 	}
 
 	pending, err := database.ListBuildsByStatus(models.StatusPending)

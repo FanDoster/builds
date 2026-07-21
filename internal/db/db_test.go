@@ -2,7 +2,9 @@ package db
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/FanDoster/builds/internal/models"
 )
@@ -150,5 +152,109 @@ func TestDeleteProjectCascadesBuilds(t *testing.T) {
 	}
 	if _, err := d.GetBuild(b.ID); err == nil {
 		t.Error("build survived project deletion (ON DELETE CASCADE not effective)")
+	}
+}
+
+func TestFailStaleRunningPreservesUnknownFinishTime(t *testing.T) {
+	d := openTestDB(t)
+	p := newProject(t, d)
+
+	mk := func() *models.Build {
+		b := &models.Build{ProjectID: p.ID, Status: models.StatusPending}
+		if err := d.CreateBuild(b); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := d.ClaimBuild(b.ID); err != nil || !ok {
+			t.Fatalf("claim: %v %v", ok, err)
+		}
+		return b
+	}
+	current, stale := mk(), mk()
+
+	failed, err := d.FailStaleRunning(current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failed) != 1 || failed[0] != stale.ID {
+		t.Fatalf("failed ids = %v, want [%d]", failed, stale.ID)
+	}
+
+	got, _ := d.GetBuild(stale.ID)
+	if got.Status != models.StatusFailed {
+		t.Errorf("stale status = %s, want failed", got.Status)
+	}
+	if got.FinishedAt != nil {
+		t.Errorf("stale build got a fabricated finished_at: %v (poisons history durations)", got.FinishedAt)
+	}
+	if !strings.Contains(got.Log, "interrupted by server restart") {
+		t.Errorf("missing sweep note in log: %q", got.Log)
+	}
+	if got.Duration() != "" {
+		t.Errorf("duration should be unknown, got %q", got.Duration())
+	}
+
+	cur, _ := d.GetBuild(current.ID)
+	if cur.Status != models.StatusRunning {
+		t.Errorf("current build was swept: %s", cur.Status)
+	}
+}
+
+func TestRepairInterruptedDurations(t *testing.T) {
+	d := openTestDB(t)
+	p := newProject(t, d)
+
+	b := &models.Build{ProjectID: p.ID, Status: models.StatusPending}
+	if err := d.CreateBuild(b); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a row swept by the OLD code: failed with the marker AND a
+	// bogus finished_at stamped at restart time.
+	d.ClaimBuild(b.ID)
+	d.UpdateBuildStatus(b.ID, models.StatusFailed, "some log\n[ERROR] Build interrupted by server restart\n")
+	if got, _ := d.GetBuild(b.ID); got.FinishedAt == nil {
+		t.Fatal("precondition: finished_at should be set by old-style sweep")
+	}
+
+	n, err := d.RepairInterruptedDurations()
+	if err != nil || n != 1 {
+		t.Fatalf("repair: n=%d err=%v", n, err)
+	}
+	got, _ := d.GetBuild(b.ID)
+	if got.FinishedAt != nil {
+		t.Errorf("finished_at not cleared: %v", got.FinishedAt)
+	}
+	// Idempotent.
+	if n, _ := d.RepairInterruptedDurations(); n != 0 {
+		t.Errorf("second repair touched %d rows, want 0", n)
+	}
+}
+
+func TestExpectedDuration(t *testing.T) {
+	d := openTestDB(t)
+	p := newProject(t, d)
+
+	if _, ok := d.ExpectedDuration(p.ID); ok {
+		t.Error("no history should mean no estimate")
+	}
+
+	// Seed successful builds with controlled 30s/60s durations.
+	base := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	for i, secs := range []int{30, 60} {
+		b := &models.Build{ProjectID: p.ID, Status: models.StatusPending}
+		if err := d.CreateBuild(b); err != nil {
+			t.Fatal(err)
+		}
+		start := base.Add(time.Duration(i) * time.Hour)
+		if _, err := d.conn.Exec(
+			`UPDATE builds SET status=?, started_at=?, finished_at=? WHERE id=?`,
+			models.StatusSuccess, start, start.Add(time.Duration(secs)*time.Second), b.ID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, ok := d.ExpectedDuration(p.ID)
+	if !ok || got != 45*time.Second {
+		t.Errorf("expected duration = %v ok=%v, want 45s", got, ok)
 	}
 }

@@ -1,0 +1,155 @@
+/* Builds — Dark theme */
+:root {
+  --bg: #0d1117;
+  --bg-card: #161b22;
+  --bg-hover: #1c2129;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d2991d;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Layout */
+header {
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+header h1 { font-size: 18px; font-weight: 600; }
+header h1 a { color: var(--text); }
+header nav { display: flex; gap: 16px; }
+header nav a { color: var(--text-muted); font-size: 14px; }
+header nav a:hover { color: var(--text); text-decoration: none; }
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+h2 { font-size: 20px; margin-bottom: 16px; }
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.card-title { font-size: 16px; font-weight: 600; }
+
+/* Status badges */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-success { background: rgba(63,185,80,0.15); color: var(--green); }
+.badge-failed  { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge-running { background: rgba(210,153,29,0.15); color: var(--orange); }
+.badge-pending { background: rgba(139,148,158,0.15); color: var(--text-muted); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--bg-hover); text-decoration: none; }
+.btn-primary { background: #238636; border-color: #238636; color: #fff; }
+.btn-primary:hover { background: #2ea043; }
+.btn-danger { color: var(--red); border-color: var(--red); }
+.btn-danger:hover { background: rgba(248,81,73,0.1); }
+
+.btn-group { display: flex; gap: 8px; }
+
+/* Forms */
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+.form-group input, .form-group textarea, .form-group select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+}
+.form-group input:focus { border-color: var(--accent); outline: none; }
+
+/* Log output */
+.log-viewer {
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  max-height: 600px;
+  overflow-y: auto;
+  color: var(--text-muted);
+}
+
+/* Build list table */
+.build-table { width: 100%; border-collapse: collapse; }
+.build-table th, .build-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.build-table th { color: var(--text-muted); font-weight: 500; font-size: 12px; }
+.build-table tr:hover { background: var(--bg-hover); }
+
+/* Meta */
+.meta { font-size: 12px; color: var(--text-muted); }
+.meta-row { display: flex; gap: 16px; margin-bottom: 8px; }
+
+/* Grid */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.tabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+.tab { padding: 8px 16px; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; font-size: 14px; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }

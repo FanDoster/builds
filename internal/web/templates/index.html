@@ -1,0 +1,44 @@
+{{define "content"}}
+<h2>Projects</h2>
+
+<div class="grid-2">
+  <div>
+    {{range .Projects}}
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <a href="{{$.BasePath}}/projects/{{.ID}}" class="card-title">{{.Name}}</a>
+          <div class="meta">{{.RepoURL}} · {{.Branch}}</div>
+        </div>
+        <span class="meta">→ registry.fandoster.com/{{.ImageName}}:latest</span>
+      </div>
+    </div>
+    {{else}}
+    <div class="card">
+      <p class="meta">No projects configured yet.</p>
+      <p class="meta">Create one via the API: <code>POST /api/projects</code></p>
+    </div>
+    {{end}}
+  </div>
+
+  <div>
+    <h2 style="margin-top:0">Recent Builds</h2>
+    {{range .Builds}}
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <a href="{{$.BasePath}}/builds/{{.ID}}" class="card-title">{{.ProjectName}} #{{.ID}}</a>
+          <div class="meta">{{.CommitMessage}}</div>
+        </div>
+        <span class="badge badge-{{.Status}}">{{.Status}}</span>
+      </div>
+      {{if .StartedAt}}
+      <div class="meta">{{.StartedAt.Format "Jan 02 15:04"}}</div>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="card"><p class="meta">No builds yet.</p></div>
+    {{end}}
+  </div>
+</div>
+{{end}}

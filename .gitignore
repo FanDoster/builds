@@ -1,0 +1,5 @@
+# Builds — Self-hosted CI/CD build server
+
+bin/
+*.db
+.hermes/

@@ -1,0 +1,39 @@
+{{define "content"}}
+<div class="card-header" style="margin-bottom: 16px">
+  <div>
+    <h2 style="margin:0">{{.Project.Name}}</h2>
+    <div class="meta-row" style="margin-top:8px">
+      <span>{{.Project.RepoURL}}</span>
+      <span>·</span>
+      <span>{{.Project.Branch}}</span>
+      <span>·</span>
+      <span>{{.Project.ImageName}}</span>
+    </div>
+    {{if .Project.DeployComposePath}}
+    <div class="meta" style="margin-top:4px">Deploy: docker compose -f {{.Project.DeployComposePath}} up -d {{.Project.DeployServiceName}}</div>
+    {{end}}
+  </div>
+  <button class="btn btn-primary" id="trigger-build" data-url="{{$.BasePath}}/api/projects/{{.Project.ID}}/build">Build</button>
+</div>
+
+<h2>Build History</h2>
+<table class="build-table">
+  <thead>
+    <tr><th>#</th><th>Commit</th><th>Message</th><th>Status</th><th>Duration</th><th></th></tr>
+  </thead>
+  <tbody>
+    {{range .Builds}}
+    <tr>
+      <td><a href="{{$.BasePath}}/builds/{{.ID}}">{{.ID}}</a></td>
+      <td class="meta">{{.CommitSHA}}</td>
+      <td>{{.CommitMessage}}</td>
+      <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+      <td class="meta">{{if .FinishedAt}}{{.FinishedAt.Sub .StartedAt | printf "%.0fs"}}{{end}}</td>
+      <td><a href="{{$.BasePath}}/builds/{{.ID}}" class="btn">Logs</a></td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="meta">No builds yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

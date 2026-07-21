@@ -1,0 +1,27 @@
+{{define "content"}}
+<div class="card-header" style="margin-bottom: 16px">
+  <div>
+    <h2 style="margin:0">{{.Build.ProjectName}} #{{.Build.ID}}</h2>
+    <div class="meta-row" style="margin-top:8px">
+      <span>{{.Build.CommitSHA}} — {{.Build.CommitMessage}}</span>
+    </div>
+    <div class="meta-row">
+      {{if .Build.StartedAt}}<span>Started: {{.Build.StartedAt.Format "Jan 02 15:04:05"}}</span>{{end}}
+      {{if .Build.FinishedAt}}<span>Finished: {{.Build.FinishedAt.Format "Jan 02 15:04:05"}}</span>{{end}}
+    </div>
+  </div>
+  <div>
+    <span class="badge badge-{{.Build.Status}}" style="font-size:14px">{{.Build.Status}}</span>
+  </div>
+</div>
+
+<div class="btn-group" style="margin-bottom: 16px">
+  <a href="{{$.BasePath}}/projects/{{.Build.ProjectID}}" class="btn">← Back to project</a>
+  <a href="{{$.BasePath}}/api/builds/{{.Build.ID}}" class="btn">JSON</a>
+</div>
+
+<h2>Build Log</h2>
+<div class="log-viewer" id="build-log"
+     data-build-id="{{.Build.ID}}"
+     data-status="{{.Build.Status}}">{{.Build.Log}}</div>
+{{end}}

@@ -19,7 +19,7 @@
     triggerBtn.addEventListener('click', function () {
       triggerBtn.disabled = true;
       triggerBtn.textContent = 'Triggering...';
-      fetch(triggerBtn.dataset.url, { method: 'POST' })
+      fetch(triggerBtn.dataset.url, { method: 'POST', headers: { 'X-Builds-Csrf': '1' } })
         .then(function (r) { return r.json(); })
         .then(function () { location.reload(); })
         .catch(function () {
@@ -175,8 +175,10 @@
         state.lastError = state.total;
       } else if (OK_RE.test(stripped)) {
         cls = 'log-line--ok';
+        display = stripped; // marker rendering slices by column; strip ANSI
       } else if (MARKER_RE.test(stripped)) {
         cls = 'log-line--marker';
+        display = stripped;
       }
 
       var abs = state.total++;
@@ -235,6 +237,12 @@
       var parts = text.split('\n');
       state.carry = parts.pop() + holdEsc;
       for (var i = 0; i < parts.length; i++) addLine(parts[i]);
+      // A pathological never-terminated line would grow carry (and its
+      // re-render cost) without bound — promote it to a real line.
+      if (state.carry.length > 65536) {
+        addLine(state.carry);
+        state.carry = '';
+      }
       scheduleFlush();
     }
 
@@ -258,7 +266,13 @@
         return;
       }
       state.rafScheduled = true;
-      requestAnimationFrame(flush);
+      // rAF doesn't fire in background tabs — pendingEls would grow without
+      // bound there; fall back to a timer so hidden tabs keep draining.
+      if (document.hidden) {
+        setTimeout(flush, 250);
+      } else {
+        requestAnimationFrame(flush);
+      }
     }
 
     function flush() {
@@ -281,8 +295,7 @@
       renderTail();
       updateCounts();
       if (state.follow) {
-        state.progScroll = true;
-        body.scrollTop = body.scrollHeight;
+        scrollToBottom();
       } else if (appended && state.status === 'running') {
         followPill.hidden = false;
       }
@@ -361,6 +374,9 @@
       if (end === null) return null;
       var d = end - start;
       if (d < 0) d += 86400; // midnight wrap
+      // A running step compares the CLIENT clock against server timestamps;
+      // a few seconds of skew would render as ~24h via the wrap correction.
+      if (d > 43200) d = 0;
       return d;
     }
     function fmtDur(sec) {
@@ -624,7 +640,12 @@
       if (state.poller || isTerminal(state.status)) return;
       setConn('polling');
       clearTimeout(state.watchdog);
-      state.poller = setInterval(function () {
+      state.poller = true;
+      // Chained timeout, not setInterval: a slow response must finish (and
+      // advance state.offset) before the next request is issued, otherwise
+      // overlapping fetches replay the same offset and duplicate log lines.
+      var tick = function () {
+        if (!state.poller) return;
         fetch(ds.logUrl + '?offset=' + state.offset)
           .then(function (res) {
             if (!res.ok) return null;
@@ -632,7 +653,7 @@
             var st = res.headers.get('X-Build-Status');
             return res.text().then(function (text) {
               if (text) processChunk(text);
-              if (!isNaN(total)) state.offset = total;
+              if (!isNaN(total) && total > state.offset) state.offset = total;
               if (st && st !== state.status && st !== 'pending') {
                 // Pull timestamps once, then apply.
                 return fetch(ds.apiUrl + '?meta=1')
@@ -644,13 +665,18 @@
               }
             });
           })
-          .catch(function () {});
-      }, 1500);
+          .catch(function () {})
+          .then(function () {
+            if (state.poller) state.pollTimer = setTimeout(tick, 1500);
+          });
+      };
+      tick();
     }
 
     function stopTransport() {
       if (state.es) { state.es.close(); state.es = null; }
-      if (state.poller) { clearInterval(state.poller); state.poller = null; }
+      state.poller = false;
+      clearTimeout(state.pollTimer);
       clearTimeout(state.watchdog);
       setConn(null);
     }
@@ -678,13 +704,22 @@
     }
 
     // ---- Follow mode ----
+    function scrollToBottom() {
+      var before = body.scrollTop;
+      state.progScroll = true;
+      body.scrollTop = body.scrollHeight;
+      if (body.scrollTop === before) {
+        // No-op scroll fires no event; a stale flag would misattribute the
+        // user's next scroll as programmatic.
+        state.progScroll = false;
+      }
+    }
     function setFollow(on) {
       state.follow = on;
       tglFollow.classList.toggle('on', on);
       if (on) {
         followPill.hidden = true;
-        state.progScroll = true;
-        body.scrollTop = body.scrollHeight;
+        scrollToBottom();
       }
     }
     body.addEventListener('scroll', function () {
@@ -773,6 +808,8 @@
       state.painted = [];
     }
     function runSearch(scroll) {
+      // Keep the user's place when re-running for streamed lines.
+      var keepAbs = (state.cur >= 0 && state.matches[state.cur] !== undefined) ? state.matches[state.cur] : -1;
       clearPainted();
       state.matches = [];
       state.cur = -1;
@@ -789,6 +826,13 @@
       }
       if (state.matches.length) {
         state.cur = 0;
+        if (keepAbs >= 0) {
+          var prevIdx = state.matches.indexOf(keepAbs);
+          if (prevIdx !== -1) {
+            state.cur = prevIdx;
+            scroll = false; // same match, don't yank the view
+          }
+        }
         paintCur(scroll);
       }
       searchCount.textContent = state.matches.length ? (state.cur + 1) + '/' + state.matches.length : '0/0';

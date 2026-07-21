@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FanDoster/builds/internal/db"
 	"github.com/FanDoster/builds/internal/logbus"
@@ -83,11 +84,34 @@ func (s *logSink) Write(p []byte) (int, error) {
 		s.lineBuf = append(s.lineBuf[:0], s.lineBuf[i+1:]...)
 	}
 
-	// Force-drain an overlong unterminated line, holding back a window large
-	// enough that a straddling secret is still caught on the next emit.
+	// Force-drain an overlong unterminated line. Scrub the WHOLE buffer
+	// first: a fully-buffered secret could otherwise be split by the cut and
+	// leak as two raw halves that scrubSecret never matches. After the
+	// scrub, only an incomplete secret suffix (still arriving) can remain,
+	// and it fits inside the holdback window by construction.
 	if len(s.lineBuf) > sinkMaxHold {
-		hold := s.holdback()
-		cut := len(s.lineBuf) - hold
+		if s.secret != "" {
+			s.lineBuf = append(s.lineBuf[:0], scrubSecret(string(s.lineBuf), s.secret)...)
+		}
+		// Never split a multi-byte UTF-8 sequence across chunk boundaries —
+		// the halves would be corrupted to U+FFFD by JSON framing.
+		cut := len(s.lineBuf) - s.holdback()
+		if cut >= len(s.lineBuf) {
+			cut = len(s.lineBuf)
+			// Hold back an incomplete trailing rune still arriving.
+			for k := 1; k <= utf8.UTFMax && cut-k >= 0; k++ {
+				if utf8.RuneStart(s.lineBuf[cut-k]) {
+					if !utf8.FullRune(s.lineBuf[cut-k : cut]) {
+						cut -= k
+					}
+					break
+				}
+			}
+		} else {
+			for cut > 0 && !utf8.RuneStart(s.lineBuf[cut]) {
+				cut--
+			}
+		}
 		if cut > 0 {
 			s.emitLocked(s.lineBuf[:cut])
 			s.lineBuf = append(s.lineBuf[:0], s.lineBuf[cut:]...)
@@ -129,8 +153,11 @@ func (s *logSink) flushDBLocked() {
 		s.lastFlush = time.Now()
 		return
 	}
-	s.db.AppendBuildLog(s.buildID, string(s.dbBuf))
-	s.dbBuf = s.dbBuf[:0]
+	// On failure (e.g. transient SQLITE_BUSY) keep the buffer and retry on
+	// the next flush instead of silently dropping a chunk of the log.
+	if err := s.db.AppendBuildLog(s.buildID, string(s.dbBuf)); err == nil {
+		s.dbBuf = s.dbBuf[:0]
+	}
 	s.lastFlush = time.Now()
 }
 

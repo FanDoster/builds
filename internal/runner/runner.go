@@ -132,8 +132,10 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 	project, err := r.DB.GetProject(build.ProjectID)
 	if err != nil {
 		msg := "\n[ERROR] Error loading project: " + err.Error() + "\n"
-		r.DB.AppendBuildLog(build.ID, msg)
+		// Bus first, DB second — same order as the sink, so a subscriber's
+		// DB-fallback replay can never double up with a queued publish.
 		r.Bus.Publish(build.ID, []byte(msg))
+		r.DB.AppendBuildLog(build.ID, msg)
 		r.finish(build.ID, models.StatusFailed, startedAt)
 		return
 	}

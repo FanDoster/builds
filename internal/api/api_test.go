@@ -67,6 +67,7 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body interfac
 		r = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(method, path, r)
+	req.Header.Set("X-Builds-Csrf", "1") // required by state-changing endpoints
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	return w
@@ -189,6 +190,14 @@ func TestTriggerBuild(t *testing.T) {
 	w = doJSON(t, mux, "POST", "/api/projects/999/build", nil)
 	if w.Code != 404 {
 		t.Errorf("unknown project: got %d, want 404", w.Code)
+	}
+
+	// Trigger requires the CSRF header like cancel/rerun.
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/projects/%d/build", p.ID), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Errorf("trigger without csrf header: got %d, want 403", rec.Code)
 	}
 }
 
@@ -529,6 +538,14 @@ func TestCancelEndpoint(t *testing.T) {
 	if len(rn.got) != 0 {
 		t.Errorf("runner should not be consulted for pending builds")
 	}
+	// The tombstone the SQL appended must be mirrored on the bus so live
+	// subscribers and the DB row stay byte-identical.
+	if tail, _, ok := s.Bus.LogTail(pending.ID, 0); !ok || !strings.Contains(string(tail), "[canceled while queued]") {
+		t.Errorf("tombstone not mirrored to bus: ok=%v tail=%q", ok, tail)
+	}
+	if !strings.Contains(got.Log, "[canceled while queued]") {
+		t.Errorf("tombstone missing from DB log: %q", got.Log)
+	}
 
 	// Running + runner accepts → 202.
 	rn.answer = true
@@ -674,5 +691,56 @@ func TestSSEUnknownBuild(t *testing.T) {
 	w := doJSON(t, mux, "GET", "/api/builds/424242/events", nil)
 	if w.Code != 404 {
 		t.Errorf("got %d, want 404", w.Code)
+	}
+}
+
+// Terminal SSE responses must write log bytes BEFORE the terminal status
+// event (the client closes its EventSource on terminal status), and must not
+// create a logbus topic for a build whose run is long over.
+func TestSSETerminalOrderingAndNoTopicLeak(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, b := seedBuild(t, s, models.StatusSuccess, "0123456789")
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(fmt.Sprintf("%s/api/builds/%d/events", srv.URL, b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+
+	logIdx := strings.Index(text, `"t":"0123456789"`)
+	statusIdx := strings.Index(text, `"status":"success"`)
+	if logIdx == -1 || statusIdx == -1 {
+		t.Fatalf("missing events:\n%s", text)
+	}
+	if logIdx > statusIdx {
+		t.Errorf("log event written after terminal status (client would drop it):\n%s", text)
+	}
+
+	// No topic may have been created for the finished build.
+	if _, _, ok := s.Bus.LogTail(b.ID, 0); ok {
+		t.Error("SSE on a terminal build leaked a logbus topic")
+	}
+	if s.Bus.Live(b.ID) {
+		t.Error("terminal build reported live after SSE request")
+	}
+}
+
+func TestAsciiFilename(t *testing.T) {
+	cases := map[string]string{
+		"app":         "app",
+		"héllo→wörld": "hllowrld",
+		`a"b\c`:       "abc", // quotes and backslashes stripped
+		"日本語":         "build",
+		"my_app-2.0":  "my_app-2.0",
+	}
+	for in, want := range cases {
+		if got := asciiFilename(in); got != want {
+			t.Errorf("asciiFilename(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

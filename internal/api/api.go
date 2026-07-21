@@ -229,6 +229,9 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 // --- Builds ---
 
 func (s *Server) handleTriggerBuild(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, 400, "invalid id")
@@ -367,7 +370,7 @@ func (s *Server) handleBuildLog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Build-Status", string(build.Status))
 	if r.URL.Query().Get("download") == "1" {
 		w.Header().Set("Content-Disposition",
-			fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s-build-%d.log", build.ProjectName, build.ID)))
+			fmt.Sprintf(`attachment; filename="%s-build-%d.log"`, asciiFilename(build.ProjectName), build.ID))
 	}
 	w.WriteHeader(200)
 	w.Write(body)
@@ -382,7 +385,8 @@ func (s *Server) handleBuildEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid id")
 		return
 	}
-	if _, err := s.DB.GetBuild(id); err != nil {
+	build, err := s.DB.GetBuild(id)
+	if err != nil {
 		writeError(w, 404, "build not found")
 		return
 	}
@@ -423,35 +427,84 @@ func (s *Server) handleBuildEvents(w http.ResponseWriter, r *http.Request) {
 		data, _ := json.Marshal(map[string]interface{}{"o": offset, "t": chunk})
 		fmt.Fprintf(w, "event: log\nid: %d\ndata: %s\n\n", offset, data)
 	}
+	// dbTail slices the stored log at the resume offset.
+	dbTail := func(b *models.Build) (string, int) {
+		f := from
+		if f > len(b.Log) {
+			f = len(b.Log)
+		}
+		return b.Log[f:], len(b.Log)
+	}
+	// Terminal ordering contract: log bytes are always written BEFORE the
+	// terminal status event — the client closes its EventSource on a
+	// terminal status and would drop anything after it.
+	writeTerminal := func(b *models.Build, chunk string, offset int) {
+		if chunk != "" {
+			writeLog(chunk, offset)
+		}
+		writeStatus(b.Status, b.StartedAt, b.FinishedAt)
+		flusher.Flush()
+	}
+
+	// Already-terminal builds are served straight from storage without
+	// subscribing — Subscribe would create a topic no terminal transition
+	// will ever clean up.
+	if build.Status.Terminal() {
+		chunk, total := "", 0
+		if tail, cur, ok := s.Bus.LogTail(id, from); ok && cur > 0 {
+			chunk, total = string(tail), cur
+		} else {
+			chunk, total = dbTail(build)
+		}
+		writeTerminal(build, chunk, total)
+		return
+	}
 
 	// Subscribe before re-reading state so no transition can slip between.
 	snapshot, cur, ch, unsub := s.Bus.Subscribe(id, from)
 	defer unsub()
 
-	build, err := s.DB.GetBuild(id)
+	build, err = s.DB.GetBuild(id)
 	if err != nil {
 		return
 	}
 
 	// Replay: bus buffer when it has data, else the stored log (finished or
 	// pre-streaming builds whose topic buffer is empty).
-	replay, total := snapshot, cur
+	replay, total := string(snapshot), cur
 	if cur == 0 && len(build.Log) > 0 {
-		f := from
-		if f > len(build.Log) {
-			f = len(build.Log)
+		replay, total = dbTail(build)
+	}
+
+	if build.Status.Terminal() {
+		// The build finished between Subscribe and the re-read. Any final
+		// log chunks are already queued on ch (delivered before close) —
+		// drain them so the client doesn't lose the tail of the log.
+	drain:
+		for {
+			select {
+			case ev, open := <-ch:
+				if !open {
+					break drain
+				}
+				if ev.Kind == "log" {
+					replay += ev.Chunk
+					total = ev.Offset
+				}
+			default:
+				break drain
+			}
 		}
-		replay, total = []byte(build.Log[f:]), len(build.Log)
+		writeTerminal(build, replay, total)
+		return
 	}
 
 	writeStatus(build.Status, build.StartedAt, build.FinishedAt)
 	if len(replay) > 0 {
-		writeLog(string(replay), total)
+		writeLog(replay, total)
 	}
 	flusher.Flush()
-	if build.Status.Terminal() {
-		return
-	}
+	sent := total // last log offset delivered to this client
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -467,19 +520,28 @@ func (s *Server) handleBuildEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		case ev, open := <-ch:
 			if !open {
-				// Dropped as a slow subscriber or topic closed. Emit the
-				// final state if terminal; otherwise the client reconnects
+				// Dropped as a slow subscriber or topic closed. If the build
+				// is terminal, backfill any log bytes this client never got
+				// before the final status; otherwise the client reconnects
 				// with Last-Event-ID and resumes.
 				if b, err := s.DB.GetBuild(id); err == nil && b.Status.Terminal() {
-					writeStatus(b.Status, b.StartedAt, b.FinishedAt)
-					flusher.Flush()
+					chunk, offset := "", sent
+					if tail, cur, ok := s.Bus.LogTail(id, sent); ok && len(tail) > 0 {
+						chunk, offset = string(tail), cur
+					} else if len(b.Log) > sent {
+						chunk, offset = b.Log[sent:], len(b.Log)
+					}
+					writeTerminal(b, chunk, offset)
 				}
 				return
 			}
 			switch ev.Kind {
 			case "log":
 				writeLog(ev.Chunk, ev.Offset)
+				sent = ev.Offset
 			case "status":
+				// Per-subscriber FIFO: all log chunks published before a
+				// terminal status are already delivered above it.
 				writeStatus(ev.Status, ev.StartedAt, ev.FinishedAt)
 			}
 			flusher.Flush()
@@ -507,6 +569,9 @@ func (s *Server) handleCancelBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	} else if ok {
+		// Mirror the tombstone the SQL appended to the DB log so the bus
+		// buffer and stored log stay byte-identical for live subscribers.
+		s.Bus.Publish(id, []byte("[canceled while queued]\n"))
 		now := time.Now().UTC()
 		s.Bus.PublishStatus(id, models.StatusCanceled, nil, &now)
 		writeJSON(w, 200, map[string]interface{}{"id": id, "status": models.StatusCanceled})
@@ -515,6 +580,12 @@ func (s *Server) handleCancelBuild(w http.ResponseWriter, r *http.Request) {
 
 	if s.Runner != nil && s.Runner.Cancel(id) {
 		// The runner writes the terminal row; clients observe it via SSE.
+		// Guard the small window where the build finished but the runner
+		// had not yet cleared its registry.
+		if b, err := s.DB.GetBuild(id); err == nil && b.Status.Terminal() && b.Status != models.StatusCanceled {
+			writeError(w, 409, "build already finished")
+			return
+		}
 		writeJSON(w, 202, map[string]interface{}{"id": id, "status": "canceling"})
 		return
 	}
@@ -682,6 +753,22 @@ func validSignature(secret string, body []byte, sigHeader string) bool {
 	mac.Write(body)
 	expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(sigHeader))
+}
+
+// asciiFilename reduces a name to header-safe ASCII for Content-Disposition
+// (raw non-ASCII or quote bytes would produce an invalid header).
+func asciiFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "build"
+	}
+	return b.String()
 }
 
 func repoURLMatch(configured, webhook string) bool {

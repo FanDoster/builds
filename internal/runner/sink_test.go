@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/FanDoster/builds/internal/db"
 	"github.com/FanDoster/builds/internal/logbus"
@@ -169,5 +170,63 @@ func TestSinkManySmallWrites(t *testing.T) {
 	build, _ := database.GetBuild(buildID)
 	if build.Log != want.String() {
 		t.Errorf("DB log mismatch: got %d bytes want %d", len(build.Log), want.Len())
+	}
+}
+
+// REGRESSION: a secret that STRADDLES the forced-drain cut must not leak as
+// two raw halves that reassemble in the stored log. Sweep the secret start
+// position across the region around the cut.
+func TestSinkSecretStraddlesForcedDrainCut(t *testing.T) {
+	const secret = "tok-SECRET-123"
+	for pos := sinkMaxHold - 2*len(secret); pos <= sinkMaxHold+len(secret); pos++ {
+		database, bus, buildID := sinkFixtures(t)
+		sink := newLogSink(buildID, secret, database, bus)
+
+		payload := strings.Repeat("x", pos) + secret + strings.Repeat("y", 300)
+		for i := 0; i < len(payload); i += 100 {
+			end := i + 100
+			if end > len(payload) {
+				end = len(payload)
+			}
+			sink.Write([]byte(payload[i:end]))
+		}
+		sink.Close()
+
+		tail, _, _ := bus.LogTail(buildID, 0)
+		if strings.Contains(string(tail), secret) {
+			t.Fatalf("pos=%d: secret leaked to bus", pos)
+		}
+		build, _ := database.GetBuild(buildID)
+		if strings.Contains(build.Log, secret) {
+			t.Fatalf("pos=%d: secret leaked to DB log", pos)
+		}
+		if !strings.Contains(build.Log, "***") {
+			t.Fatalf("pos=%d: secret not masked at all", pos)
+		}
+	}
+}
+
+// A forced drain must never split a multi-byte UTF-8 rune across chunks.
+func TestSinkForcedDrainRespectsRuneBoundaries(t *testing.T) {
+	database, bus, buildID := sinkFixtures(t)
+	sink := newLogSink(buildID, "", database, bus)
+
+	payload := strings.Repeat("é", sinkMaxHold) // 2 bytes each, no terminator
+	for i := 0; i < len(payload); i += 100 {
+		end := i + 100
+		if end > len(payload) {
+			end = len(payload)
+		}
+		sink.Write([]byte(payload[i:end]))
+	}
+	sink.Close()
+
+	tail, _, _ := bus.LogTail(buildID, 0)
+	if !utf8.Valid(tail) {
+		t.Error("bus buffer contains invalid UTF-8 after forced drains")
+	}
+	build, _ := database.GetBuild(buildID)
+	if build.Log != string(tail) {
+		t.Errorf("DB log diverged from bus buffer")
 	}
 }

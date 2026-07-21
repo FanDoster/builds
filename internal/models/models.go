@@ -12,18 +12,24 @@ const (
 )
 
 type Project struct {
-	ID                 int64     `json:"id"`
-	Name               string    `json:"name"`
-	RepoURL            string    `json:"repo_url"`
-	Branch             string    `json:"branch"`
-	DockerfilePath     string    `json:"dockerfile_path"`
-	ImageName          string    `json:"image_name"`
-	DeployComposePath  string    `json:"deploy_compose_path,omitempty"`
-	DeployServiceName  string    `json:"deploy_service_name,omitempty"`
-	WebhookSecret      string    `json:"-"`
-	CloneToken         string    `json:"-"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                int64     `json:"id"`
+	Name              string    `json:"name"`
+	RepoURL           string    `json:"repo_url"`
+	Branch            string    `json:"branch"`
+	DockerfilePath    string    `json:"dockerfile_path"`
+	ImageName         string    `json:"image_name"`
+	DeployComposePath string    `json:"deploy_compose_path,omitempty"`
+	DeployServiceName string    `json:"deploy_service_name,omitempty"`
+	WebhookSecret     string    `json:"webhook_secret,omitempty"`
+	CloneToken        string    `json:"clone_token,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// Sanitize clears sensitive fields for API responses.
+func (p *Project) Sanitize() {
+	p.WebhookSecret = ""
+	p.CloneToken = ""
 }
 
 type Build struct {

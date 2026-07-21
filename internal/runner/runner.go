@@ -85,7 +85,7 @@ func (r *Runner) runBuild(build *models.Build) {
 	}
 
 	logStep(fmt.Sprintf("Cloning %s (branch: %s)", project.RepoURL, project.Branch))
-	cloneCmd := exec.Command("git", "clone", "--depth", "1", "--branch", project.Branch, cloneURL, workDir)
+	cloneCmd := newCmd("git", "clone", "--depth", "1", "--branch", project.Branch, cloneURL, workDir)
 	cloneOutput, cloneErr := cloneCmd.CombinedOutput()
 	log.WriteString(string(cloneOutput))
 	r.DB.AppendBuildLog(build.ID, string(cloneOutput))
@@ -97,7 +97,7 @@ func (r *Runner) runBuild(build *models.Build) {
 
 	// Checkout specific commit if provided and not "manual"
 	if build.CommitSHA != "" && build.CommitSHA != "manual" {
-		checkoutCmd := exec.Command("git", "-C", workDir, "checkout", build.CommitSHA)
+		checkoutCmd := newCmd("git", "-C", workDir, "checkout", build.CommitSHA)
 		coOut, coErr := checkoutCmd.CombinedOutput()
 		log.WriteString(string(coOut))
 		r.DB.AppendBuildLog(build.ID, string(coOut))
@@ -111,7 +111,7 @@ func (r *Runner) runBuild(build *models.Build) {
 	imageTag := fmt.Sprintf("registry.fandoster.com/%s:latest", project.ImageName)
 
 	logStep(fmt.Sprintf("Building Docker image: %s", imageTag))
-	buildCmd := exec.Command("docker", "build", "-t", imageTag, "-f", dockerfile, workDir)
+	buildCmd := newCmd("docker", "build", "-t", imageTag, "-f", dockerfile, workDir)
 	buildOutput, buildErr := buildCmd.CombinedOutput()
 	log.WriteString(string(buildOutput))
 	r.DB.AppendBuildLog(build.ID, string(buildOutput))
@@ -123,7 +123,7 @@ func (r *Runner) runBuild(build *models.Build) {
 
 	// Step 3: Docker push
 	logStep(fmt.Sprintf("Pushing image: %s", imageTag))
-	pushCmd := exec.Command("docker", "push", imageTag)
+	pushCmd := newCmd("docker", "push", imageTag)
 	pushOutput, pushErr := pushCmd.CombinedOutput()
 	log.WriteString(string(pushOutput))
 	r.DB.AppendBuildLog(build.ID, string(pushOutput))
@@ -136,7 +136,7 @@ func (r *Runner) runBuild(build *models.Build) {
 	// Step 4: Deploy (if configured)
 	if project.DeployComposePath != "" && project.DeployServiceName != "" {
 		logStep(fmt.Sprintf("Deploying: docker compose -f %s up -d %s", project.DeployComposePath, project.DeployServiceName))
-		deployCmd := exec.Command("docker", "compose", "-f", project.DeployComposePath, "up", "-d", "--pull", "always", project.DeployServiceName)
+		deployCmd := newCmd("docker", "compose", "-f", project.DeployComposePath, "up", "-d", "--pull", "always", project.DeployServiceName)
 		deployOutput, deployErr := deployCmd.CombinedOutput()
 		log.WriteString(string(deployOutput))
 		r.DB.AppendBuildLog(build.ID, string(deployOutput))
@@ -162,4 +162,10 @@ func (r *Runner) failBuild(buildID int64, logBuilder strings.Builder, msg string
 func injectToken(url, token string) string {
 	// https://github.com/user/repo.git → https://token@github.com/user/repo.git
 	return strings.Replace(url, "https://", "https://"+token+"@", 1)
+}
+
+func newCmd(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no")
+	return cmd
 }

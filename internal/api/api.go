@@ -63,6 +63,9 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []models.Project{}
 	}
+	for i := range projects {
+		projects[i].Sanitize()
+	}
 	writeJSON(w, 200, projects)
 }
 
@@ -93,6 +96,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-fetch to get secrets cleared from response
 	created, _ := s.DB.GetProject(p.ID)
+	created.Sanitize()
 	writeJSON(w, 201, created)
 }
 
@@ -107,6 +111,7 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "project not found")
 		return
 	}
+	p.Sanitize()
 	writeJSON(w, 200, p)
 }
 
@@ -163,6 +168,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-fetch without secrets
 	updated, _ := s.DB.GetProject(id)
+	updated.Sanitize()
 	writeJSON(w, 200, updated)
 }
 

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,32 +10,53 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/logbus"
 	"github.com/FanDoster/builds/internal/models"
 )
 
 const DefaultBuildTimeout = 30 * time.Minute
 
+// ErrCanceledByUser is the cancellation cause set by Cancel so that a
+// user-initiated cancel is distinguishable from timeouts and shutdown.
+var ErrCanceledByUser = errors.New("canceled by user")
+
+// LOG GRAMMAR — pinned contract between the runner and the web UI's parser
+// (internal/web/static/js/app.js). Changing any of these requires updating
+// both sides and internal/runner/testdata/log_fixture.txt:
+//
+//	step boundary: "[HH:MM:SS] ##[step:<id>] <detail>\n"  <id> ∈ clone|checkout|build|push|deploy
+//	error:         "[ERROR] <msg>\n" (preceded by a blank line)
+//	success:       "[HH:MM:SS] BUILD SUCCESS\n"
+//	cancel:        "[HH:MM:SS] Build canceled by user (partial artifacts may remain)\n"
+
 type Runner struct {
 	DB      *db.DB
 	Jobs    <-chan *models.Build
+	Bus     *logbus.Bus
 	Timeout time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	mu            sync.Mutex
+	currentID     int64
+	cancelCurrent context.CancelCauseFunc
 }
 
-func New(database *db.DB, jobs <-chan *models.Build) *Runner {
-	ctx, cancel := context.WithCancel(context.Background())
+func New(database *db.DB, jobs <-chan *models.Build, bus *logbus.Bus) *Runner {
+	ctx, cancel := context.WithCancelCause(context.Background())
 	return &Runner{
 		DB:      database,
 		Jobs:    jobs,
+		Bus:     bus,
 		Timeout: DefaultBuildTimeout,
 		ctx:     ctx,
-		cancel:  cancel,
+		cancel:  func() { cancel(context.Canceled) },
 	}
 }
 
@@ -49,6 +71,18 @@ func (r *Runner) Stop() {
 	r.wg.Wait()
 }
 
+// Cancel requests cancellation of the currently running build. Returns true
+// iff id is the build the worker is processing right now.
+func (r *Runner) Cancel(id int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentID == id && r.cancelCurrent != nil {
+		r.cancelCurrent(ErrCanceledByUser)
+		return true
+	}
+	return false
+}
+
 func (r *Runner) loop() {
 	defer r.wg.Done()
 	for {
@@ -56,40 +90,75 @@ func (r *Runner) loop() {
 		case <-r.ctx.Done():
 			return
 		case build := <-r.Jobs:
-			r.runBuild(build)
+			r.process(build)
 		}
 	}
 }
 
-func (r *Runner) runBuild(build *models.Build) {
+// process is one loop iteration. INVARIANT: the cancel registry is populated
+// BEFORE ClaimBuild, so at every instant a cancel request lands either on the
+// pending row (CancelPendingBuild) or on the registered context — never in a
+// gap between the two.
+func (r *Runner) process(build *models.Build) {
+	ctx, cancelCause := context.WithCancelCause(r.ctx)
+	defer cancelCause(nil)
+
+	r.mu.Lock()
+	r.currentID = build.ID
+	r.cancelCurrent = cancelCause
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.currentID = 0
+		r.cancelCurrent = nil
+		r.mu.Unlock()
+	}()
+
+	claimed, err := r.DB.ClaimBuild(build.ID)
+	if err != nil || !claimed {
+		// Canceled while queued (or already handled elsewhere) — skip.
+		return
+	}
+	startedAt := time.Now().UTC()
+	r.runBuild(ctx, build, startedAt)
+}
+
+func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	defer cancel()
+
+	r.Bus.PublishStatus(build.ID, models.StatusRunning, &startedAt, nil)
+
 	project, err := r.DB.GetProject(build.ProjectID)
 	if err != nil {
-		r.DB.UpdateBuildStatus(build.ID, models.StatusFailed, "Error loading project: "+err.Error())
+		msg := "\n[ERROR] Error loading project: " + err.Error() + "\n"
+		r.DB.AppendBuildLog(build.ID, msg)
+		r.Bus.Publish(build.ID, []byte(msg))
+		r.finish(build.ID, models.StatusFailed, startedAt)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.ctx, r.Timeout)
-	defer cancel()
+	sink := newLogSink(build.ID, project.CloneToken, r.DB, r.Bus)
+	defer sink.Close()
 
-	// Update status to running
-	r.DB.UpdateBuildStatus(build.ID, models.StatusRunning, "Build started\n")
-
-	var log strings.Builder
-
-	// All output goes through appendLog so secrets never reach the stored log.
-	appendLog := func(text string) {
-		text = scrubSecret(text, project.CloneToken)
-		log.WriteString(text)
-		r.DB.AppendBuildLog(build.ID, text)
-	}
 	logStep := func(msg string) {
-		ts := time.Now().UTC().Format("15:04:05")
-		appendLog(fmt.Sprintf("[%s] %s\n", ts, msg))
+		fmt.Fprintf(sink, "[%s] %s\n", time.Now().UTC().Format("15:04:05"), msg)
 	}
+	stepStart := func(id, detail string) {
+		logStep("##[step:" + id + "] " + detail)
+	}
+	// fail terminates the build; a user cancel takes precedence over the
+	// error that the killed command surfaced.
 	fail := func(msg string) {
-		msg = scrubSecret(msg, project.CloneToken)
-		log.WriteString(fmt.Sprintf("\n[ERROR] %s\n", msg))
-		r.DB.UpdateBuildStatus(build.ID, models.StatusFailed, log.String())
+		if context.Cause(ctx) == ErrCanceledByUser {
+			logStep("Build canceled by user (partial artifacts may remain)")
+			sink.Close()
+			r.finish(build.ID, models.StatusCanceled, startedAt)
+			return
+		}
+		fmt.Fprintf(sink, "\n[ERROR] %s\n", msg)
+		sink.Close()
+		r.finish(build.ID, models.StatusFailed, startedAt)
 	}
 
 	logStep(fmt.Sprintf("Starting build for project: %s", project.Name))
@@ -118,59 +187,50 @@ func (r *Runner) runBuild(build *models.Build) {
 		cloneURL = injectToken(cloneURL, project.CloneToken)
 	}
 
-	logStep(fmt.Sprintf("Cloning %s (branch: %s)", project.RepoURL, project.Branch))
-	cloneCmd := newCmd(ctx, "git", "clone", "--depth", "1", "--branch", project.Branch, cloneURL, workDir)
-	cloneOutput, cloneErr := cloneCmd.CombinedOutput()
-	appendLog(string(cloneOutput))
-
-	if cloneErr != nil {
-		fail(fmt.Sprintf("Git clone failed: %v%s", cloneErr, timeoutHint(ctx)))
+	stepStart("clone", fmt.Sprintf("Cloning %s (branch: %s)", project.RepoURL, project.Branch))
+	cloneCmd := newCmd(ctx, sink, "git", "clone", "--depth", "1", "--branch", project.Branch, cloneURL, workDir)
+	if err := cloneCmd.Run(); err != nil {
+		fail(fmt.Sprintf("Git clone failed: %v%s", err, timeoutHint(ctx)))
 		return
 	}
 
 	// Checkout specific commit if provided and not "manual"
 	if build.CommitSHA != "" && build.CommitSHA != "manual" {
-		checkoutCmd := newCmd(ctx, "git", "-C", workDir, "checkout", build.CommitSHA)
-		coOut, coErr := checkoutCmd.CombinedOutput()
-		appendLog(string(coOut))
-		if coErr != nil {
-			logStep(fmt.Sprintf("Warning: checkout failed: %v (continuing with branch HEAD)", coErr))
+		stepStart("checkout", "Checking out "+build.CommitSHA)
+		checkoutCmd := newCmd(ctx, sink, "git", "-C", workDir, "checkout", build.CommitSHA)
+		if err := checkoutCmd.Run(); err != nil {
+			if context.Cause(ctx) != nil {
+				fail(fmt.Sprintf("Checkout failed: %v%s", err, timeoutHint(ctx)))
+				return
+			}
+			logStep(fmt.Sprintf("Warning: checkout failed: %v (continuing with branch HEAD)", err))
 		}
 	}
 
 	// Step 2: Docker build
 	imageTag := fmt.Sprintf("registry.fandoster.com/%s:latest", project.ImageName)
 
-	logStep(fmt.Sprintf("Building Docker image: %s", imageTag))
-	buildCmd := newCmd(ctx, "docker", "build", "-t", imageTag, "-f", dockerfile, workDir)
-	buildOutput, buildErr := buildCmd.CombinedOutput()
-	appendLog(string(buildOutput))
-
-	if buildErr != nil {
-		fail(fmt.Sprintf("Docker build failed: %v%s", buildErr, timeoutHint(ctx)))
+	stepStart("build", "Building Docker image: "+imageTag)
+	buildCmd := newCmd(ctx, sink, "docker", "build", "--progress=plain", "-t", imageTag, "-f", dockerfile, workDir)
+	if err := buildCmd.Run(); err != nil {
+		fail(fmt.Sprintf("Docker build failed: %v%s", err, timeoutHint(ctx)))
 		return
 	}
 
 	// Step 3: Docker push
-	logStep(fmt.Sprintf("Pushing image: %s", imageTag))
-	pushCmd := newCmd(ctx, "docker", "push", imageTag)
-	pushOutput, pushErr := pushCmd.CombinedOutput()
-	appendLog(string(pushOutput))
-
-	if pushErr != nil {
-		fail(fmt.Sprintf("Docker push failed: %v%s", pushErr, timeoutHint(ctx)))
+	stepStart("push", "Pushing image: "+imageTag)
+	pushCmd := newCmd(ctx, sink, "docker", "push", imageTag)
+	if err := pushCmd.Run(); err != nil {
+		fail(fmt.Sprintf("Docker push failed: %v%s", err, timeoutHint(ctx)))
 		return
 	}
 
 	// Step 4: Deploy (if configured)
 	if project.DeployComposePath != "" && project.DeployServiceName != "" {
-		logStep(fmt.Sprintf("Deploying: docker compose -f %s up -d %s", project.DeployComposePath, project.DeployServiceName))
-		deployCmd := newCmd(ctx, "docker", "compose", "-f", project.DeployComposePath, "up", "-d", "--pull", "always", project.DeployServiceName)
-		deployOutput, deployErr := deployCmd.CombinedOutput()
-		appendLog(string(deployOutput))
-
-		if deployErr != nil {
-			fail(fmt.Sprintf("Deploy failed: %v%s", deployErr, timeoutHint(ctx)))
+		stepStart("deploy", fmt.Sprintf("Deploying: docker compose -f %s up -d %s", project.DeployComposePath, project.DeployServiceName))
+		deployCmd := newCmd(ctx, sink, "docker", "compose", "-f", project.DeployComposePath, "up", "-d", "--pull", "always", project.DeployServiceName)
+		if err := deployCmd.Run(); err != nil {
+			fail(fmt.Sprintf("Deploy failed: %v%s", err, timeoutHint(ctx)))
 			return
 		}
 	} else {
@@ -179,15 +239,25 @@ func (r *Runner) runBuild(build *models.Build) {
 
 	// Success!
 	logStep("BUILD SUCCESS")
-	r.DB.UpdateBuildStatus(build.ID, models.StatusSuccess, log.String())
+	sink.Close()
+	r.finish(build.ID, models.StatusSuccess, startedAt)
 }
 
-// timeoutHint annotates command failures caused by the build deadline or a
-// server shutdown, which otherwise surface as an opaque "signal: killed".
+// finish writes the terminal DB row and broadcasts the transition.
+func (r *Runner) finish(buildID int64, status models.BuildStatus, startedAt time.Time) {
+	r.DB.FinishBuild(buildID, status)
+	finishedAt := time.Now().UTC()
+	r.Bus.PublishStatus(buildID, status, &startedAt, &finishedAt)
+}
+
+// timeoutHint annotates command failures caused by cancellation, which
+// otherwise surface as an opaque "signal: killed".
 func timeoutHint(ctx context.Context) string {
-	switch ctx.Err() {
+	switch context.Cause(ctx) {
 	case context.DeadlineExceeded:
 		return " (build timed out)"
+	case ErrCanceledByUser:
+		return " (canceled by user)"
 	case context.Canceled:
 		return " (build canceled by server shutdown)"
 	}
@@ -229,8 +299,24 @@ func scrubSecret(s, secret string) string {
 	return s
 }
 
-func newCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+func newCmd(ctx context.Context, sink *logSink, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no")
+	// Identical writer for both streams: os/exec then serializes Writes on a
+	// single pipe, preserving interleaving.
+	cmd.Stdout = sink
+	cmd.Stderr = sink
+	// On cancel/timeout, kill the whole process group — child processes
+	// (ssh under git, buildkit under docker) would otherwise survive and
+	// hold the output pipe open, blocking Run until they exit. WaitDelay
+	// bounds the pipe-wait as a backstop for detached grandchildren.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
 	return cmd
 }

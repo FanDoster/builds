@@ -1,19 +1,23 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/logbus"
 	"github.com/FanDoster/builds/internal/models"
 )
 
@@ -25,10 +29,21 @@ func newTestServer(t *testing.T) (*Server, *http.ServeMux) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	s := &Server{DB: database, BuildCh: make(chan *models.Build, 10)}
+	s := &Server{DB: database, BuildCh: make(chan *models.Build, 10), Bus: logbus.New()}
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
 	return s, mux
+}
+
+// fakeCanceler records Cancel calls and returns a scripted answer.
+type fakeCanceler struct {
+	got    []int64
+	answer bool
+}
+
+func (f *fakeCanceler) Cancel(id int64) bool {
+	f.got = append(f.got, id)
+	return f.answer
 }
 
 func createProject(t *testing.T, s *Server, p models.Project) *models.Project {
@@ -381,5 +396,283 @@ func TestValidSignature(t *testing.T) {
 	}
 	if validSignature("secret", body, "") {
 		t.Error("empty signature accepted")
+	}
+}
+
+// --- New build-page endpoints ---
+
+func seedBuild(t *testing.T, s *Server, status models.BuildStatus, log string) (*models.Project, *models.Build) {
+	t.Helper()
+	p, err := s.DB.GetProjectByName("app")
+	if err != nil {
+		p = createProject(t, s, models.Project{
+			Name: "app", RepoURL: "https://github.com/u/app", Branch: "main",
+			DockerfilePath: "Dockerfile", ImageName: "app",
+		})
+	}
+	b := &models.Build{ProjectID: p.ID, Status: models.StatusPending, CommitSHA: "abc123def456", CommitMessage: "msg"}
+	if err := s.DB.CreateBuild(b); err != nil {
+		t.Fatal(err)
+	}
+	if status != models.StatusPending {
+		if err := s.DB.UpdateBuildStatus(b.ID, status, log); err != nil {
+			t.Fatal(err)
+		}
+	} else if log != "" {
+		s.DB.AppendBuildLog(b.ID, log)
+	}
+	b.Status = status
+	return p, b
+}
+
+func TestGetBuildMeta(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, b := seedBuild(t, s, models.StatusPending, "hello log\n")
+
+	w := doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d?meta=1", b.ID), nil)
+	if w.Code != 200 {
+		t.Fatalf("meta: got %d", w.Code)
+	}
+	var got models.Build
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if got.Log != "" {
+		t.Errorf("meta response must omit log, got %q", got.Log)
+	}
+	if got.LogLen != int64(len("hello log\n")) {
+		t.Errorf("log_len = %d, want %d", got.LogLen, len("hello log\n"))
+	}
+	if got.QueuePosition < 1 {
+		t.Errorf("queue_position = %d, want >= 1 for pending", got.QueuePosition)
+	}
+
+	// Non-meta keeps the log.
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d", b.ID), nil)
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if got.Log == "" {
+		t.Error("plain GET should include log")
+	}
+}
+
+func TestBuildLogEndpoint(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, b := seedBuild(t, s, models.StatusSuccess, "0123456789")
+
+	w := doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log", b.ID), nil)
+	if w.Code != 200 || w.Body.String() != "0123456789" {
+		t.Fatalf("full log: %d %q", w.Code, w.Body.String())
+	}
+	if w.Header().Get("X-Log-Offset") != "10" || w.Header().Get("X-Build-Status") != "success" {
+		t.Errorf("headers: offset=%q status=%q", w.Header().Get("X-Log-Offset"), w.Header().Get("X-Build-Status"))
+	}
+
+	// Incremental tail.
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log?offset=6", b.ID), nil)
+	if w.Body.String() != "6789" {
+		t.Errorf("offset tail = %q, want 6789", w.Body.String())
+	}
+	// Offset beyond end → empty, not error.
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log?offset=99", b.ID), nil)
+	if w.Code != 200 || w.Body.Len() != 0 {
+		t.Errorf("beyond-end: %d %q", w.Code, w.Body.String())
+	}
+	// Bad offset → 400.
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log?offset=-1", b.ID), nil)
+	if w.Code != 400 {
+		t.Errorf("negative offset: got %d, want 400", w.Code)
+	}
+	// Download disposition.
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log?download=1", b.ID), nil)
+	if cd := w.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, fmt.Sprintf("build-%d.log", b.ID)) {
+		t.Errorf("disposition = %q", cd)
+	}
+
+	// Live bus buffer is preferred over the (stale) DB row.
+	_, b2 := seedBuild(t, s, models.StatusRunning, "db-old")
+	s.Bus.Publish(b2.ID, []byte("bus-fresh-content"))
+	w = doJSON(t, mux, "GET", fmt.Sprintf("/api/builds/%d/log", b2.ID), nil)
+	if w.Body.String() != "bus-fresh-content" {
+		t.Errorf("live log = %q, want bus content", w.Body.String())
+	}
+}
+
+func TestCancelEndpoint(t *testing.T) {
+	s, mux := newTestServer(t)
+	rn := &fakeCanceler{}
+	s.Runner = rn
+
+	// Missing CSRF header → 403.
+	_, pending := seedBuild(t, s, models.StatusPending, "")
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/builds/%d/cancel", pending.ID), nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("no csrf: got %d, want 403", w.Code)
+	}
+
+	csrfPost := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", path, nil)
+		req.Header.Set("X-Builds-Csrf", "1")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+
+	// Pending → tombstoned directly, 200.
+	w = csrfPost(fmt.Sprintf("/api/builds/%d/cancel", pending.ID))
+	if w.Code != 200 {
+		t.Fatalf("cancel pending: got %d: %s", w.Code, w.Body)
+	}
+	got, _ := s.DB.GetBuild(pending.ID)
+	if got.Status != models.StatusCanceled || got.FinishedAt == nil {
+		t.Errorf("pending not canceled: %+v", got)
+	}
+	if len(rn.got) != 0 {
+		t.Errorf("runner should not be consulted for pending builds")
+	}
+
+	// Running + runner accepts → 202.
+	rn.answer = true
+	_, running := seedBuild(t, s, models.StatusRunning, "")
+	w = csrfPost(fmt.Sprintf("/api/builds/%d/cancel", running.ID))
+	if w.Code != 202 {
+		t.Fatalf("cancel running: got %d: %s", w.Code, w.Body)
+	}
+	if len(rn.got) != 1 || rn.got[0] != running.ID {
+		t.Errorf("runner.Cancel calls = %v", rn.got)
+	}
+
+	// Finished → 409.
+	rn.answer = false
+	_, doneB := seedBuild(t, s, models.StatusSuccess, "")
+	w = csrfPost(fmt.Sprintf("/api/builds/%d/cancel", doneB.ID))
+	if w.Code != 409 {
+		t.Errorf("cancel finished: got %d, want 409", w.Code)
+	}
+	// Already canceled → 200 with already flag.
+	w = csrfPost(fmt.Sprintf("/api/builds/%d/cancel", pending.ID))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "already") {
+		t.Errorf("re-cancel: %d %s", w.Code, w.Body)
+	}
+	// Unknown → 404.
+	w = csrfPost("/api/builds/99999/cancel")
+	if w.Code != 404 {
+		t.Errorf("unknown: got %d, want 404", w.Code)
+	}
+}
+
+func TestRerunEndpoint(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, src := seedBuild(t, s, models.StatusFailed, "old log")
+
+	// CSRF required.
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/builds/%d/rerun", src.ID), nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("no csrf: got %d", w.Code)
+	}
+
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/builds/%d/rerun", src.ID), nil)
+	req.Header.Set("X-Builds-Csrf", "1")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 201 {
+		t.Fatalf("rerun: got %d: %s", w.Code, w.Body)
+	}
+	var nb models.Build
+	json.Unmarshal(w.Body.Bytes(), &nb)
+	if nb.ID == src.ID || nb.CommitSHA != src.CommitSHA || nb.Status != models.StatusPending {
+		t.Errorf("new build wrong: %+v", nb)
+	}
+	if !strings.Contains(nb.CommitMessage, fmt.Sprintf("Re-run of #%d", src.ID)) {
+		t.Errorf("commit message = %q", nb.CommitMessage)
+	}
+	select {
+	case q := <-s.BuildCh:
+		if q.ID != nb.ID {
+			t.Errorf("queued %d, want %d", q.ID, nb.ID)
+		}
+	default:
+		t.Error("rerun build not queued")
+	}
+}
+
+// SSE: a finished build replays its log from the requested offset and closes.
+func TestSSEFinishedBuildReplaysAndCloses(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, b := seedBuild(t, s, models.StatusSuccess, "0123456789")
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(fmt.Sprintf("%s/api/builds/%d/events?offset=4", srv.URL, b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q", ct)
+	}
+	body, err := io.ReadAll(resp.Body) // returns because handler closes
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, `"status":"success"`) {
+		t.Errorf("missing terminal status event:\n%s", text)
+	}
+	if !strings.Contains(text, `"t":"456789"`) {
+		t.Errorf("missing offset replay:\n%s", text)
+	}
+}
+
+// SSE: a running build streams chunks live and closes on terminal status.
+func TestSSELiveStream(t *testing.T) {
+	s, mux := newTestServer(t)
+	_, b := seedBuild(t, s, models.StatusRunning, "")
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Get(fmt.Sprintf("%s/api/builds/%d/events", srv.URL, b.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.Bus.Publish(b.ID, []byte("chunk-one\n"))
+		s.Bus.Publish(b.ID, []byte("chunk-two\n"))
+		now := time.Now().UTC()
+		s.DB.FinishBuild(b.ID, models.StatusSuccess)
+		s.Bus.PublishStatus(b.ID, models.StatusSuccess, &now, &now)
+	}()
+
+	deadline := time.AfterFunc(10*time.Second, func() { resp.Body.Close() })
+	defer deadline.Stop()
+
+	var events []string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data: ") {
+			events = append(events, line)
+		}
+	}
+	joined := strings.Join(events, "\n")
+	if !strings.Contains(joined, "chunk-one") || !strings.Contains(joined, "chunk-two") {
+		t.Errorf("missing live chunks:\n%s", joined)
+	}
+	if !strings.Contains(joined, `"status":"success"`) {
+		t.Errorf("missing terminal status:\n%s", joined)
+	}
+}
+
+func TestSSEUnknownBuild(t *testing.T) {
+	_, mux := newTestServer(t)
+	w := doJSON(t, mux, "GET", "/api/builds/424242/events", nil)
+	if w.Code != 404 {
+		t.Errorf("got %d, want 404", w.Code)
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/FanDoster/builds/internal/api"
 	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/logbus"
 	"github.com/FanDoster/builds/internal/models"
 	"github.com/FanDoster/builds/internal/runner"
 	"github.com/FanDoster/builds/internal/web"
@@ -33,11 +34,14 @@ func main() {
 	// Build job queue (buffered channel)
 	buildCh := make(chan *models.Build, 100)
 
+	// Live log pub/sub hub
+	bus := logbus.New()
+
 	// Recover builds orphaned by a previous shutdown before accepting new work.
 	recoverOrphanedBuilds(database, buildCh)
 
 	// Start runner
-	r := runner.New(database, buildCh)
+	r := runner.New(database, buildCh, bus)
 	if v := os.Getenv("BUILDS_BUILD_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -52,7 +56,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	// API
-	apiServer := &api.Server{DB: database, BuildCh: buildCh, BasePath: basePath}
+	apiServer := &api.Server{DB: database, BuildCh: buildCh, Bus: bus, Runner: r, BasePath: basePath}
 	apiServer.RegisterRoutes(mux)
 
 	// Web UI

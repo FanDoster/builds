@@ -4,9 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{.Title}} — Builds</title>
+  <link rel="icon" id="favicon" href="data:,">
   <link rel="stylesheet" href="{{.BasePath}}/static/css/style.css">
 </head>
-<body>
+<body data-base-path="{{.BasePath}}">
   <header>
     <h1><a href="{{.BasePath}}/">Builds</a></h1>
     <nav>

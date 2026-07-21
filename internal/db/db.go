@@ -200,7 +200,7 @@ func (d *DB) ListBuildsByProject(projectID int64, limit int) ([]models.Build, er
 		`SELECT b.id, b.project_id, p.name, b.status, b.commit_sha, b.commit_message, b.log, b.started_at, b.finished_at, b.created_at
 		 FROM builds b JOIN projects p ON p.id = b.project_id
 		 WHERE b.project_id = ?
-		 ORDER BY b.created_at DESC LIMIT ?`, projectID, limit,
+		 ORDER BY b.created_at DESC, b.id DESC LIMIT ?`, projectID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -226,7 +226,7 @@ func (d *DB) ListRecentBuilds(limit int) ([]models.Build, error) {
 	rows, err := d.conn.Query(
 		`SELECT b.id, b.project_id, p.name, b.status, b.commit_sha, b.commit_message, b.log, b.started_at, b.finished_at, b.created_at
 		 FROM builds b JOIN projects p ON p.id = b.project_id
-		 ORDER BY b.created_at DESC LIMIT ?`, limit,
+		 ORDER BY b.created_at DESC, b.id DESC LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -269,6 +269,65 @@ func (d *DB) ListBuildsByStatus(status models.BuildStatus) ([]models.Build, erro
 	return builds, rows.Err()
 }
 
+// ClaimBuild atomically transitions a pending build to running. Returns false
+// if the build was not pending (e.g. canceled while queued).
+func (d *DB) ClaimBuild(id int64) (bool, error) {
+	res, err := d.conn.Exec(
+		`UPDATE builds SET status=?, started_at=? WHERE id=? AND status=?`,
+		models.StatusRunning, time.Now().UTC(), id, models.StatusPending,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// CancelPendingBuild atomically cancels a build that has not started yet.
+// Returns false if the build was not pending.
+func (d *DB) CancelPendingBuild(id int64) (bool, error) {
+	res, err := d.conn.Exec(
+		`UPDATE builds SET status=?, finished_at=?, log = log || '[canceled while queued]' || char(10)
+		 WHERE id=? AND status=?`,
+		models.StatusCanceled, time.Now().UTC(), id, models.StatusPending,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// FinishBuild marks a build terminal without touching the log column (the log
+// has already been streamed in via AppendBuildLog).
+func (d *DB) FinishBuild(id int64, status models.BuildStatus) error {
+	_, err := d.conn.Exec(
+		`UPDATE builds SET status=?, finished_at=? WHERE id=?`,
+		status, time.Now().UTC(), id,
+	)
+	return err
+}
+
+// QueuePosition returns a pending build's 1-based position in the run order:
+// pending builds ahead of it (lower id) plus one slot for any running build.
+func (d *DB) QueuePosition(id int64) (int, error) {
+	var ahead int
+	err := d.conn.QueryRow(
+		`SELECT COUNT(*) FROM builds WHERE status=? AND id < ?`, models.StatusPending, id,
+	).Scan(&ahead)
+	if err != nil {
+		return 0, err
+	}
+	var running int
+	err = d.conn.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM builds WHERE status=?)`, models.StatusRunning,
+	).Scan(&running)
+	if err != nil {
+		return 0, err
+	}
+	return 1 + ahead + running, nil
+}
+
 func (d *DB) UpdateBuildStatus(id int64, status models.BuildStatus, log string) error {
 	now := time.Now().UTC()
 	var started, finished *time.Time
@@ -276,7 +335,7 @@ func (d *DB) UpdateBuildStatus(id int64, status models.BuildStatus, log string) 
 	switch status {
 	case models.StatusRunning:
 		started = &now
-	case models.StatusSuccess, models.StatusFailed:
+	case models.StatusSuccess, models.StatusFailed, models.StatusCanceled:
 		finished = &now
 	}
 

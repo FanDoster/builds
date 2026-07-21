@@ -1,0 +1,243 @@
+package runner
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/logbus"
+	"github.com/FanDoster/builds/internal/models"
+)
+
+// testEnv wires a Runner against a real temp DB, a real local git repo, and
+// a stub `docker` binary on PATH that respects DOCKER_STUB_SLEEP/EXIT.
+type testEnv struct {
+	db  *db.DB
+	bus *logbus.Bus
+	r   *Runner
+}
+
+func newTestEnv(t *testing.T) (*testEnv, *models.Build) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Stub docker on PATH.
+	binDir := t.TempDir()
+	script := "#!/bin/sh\necho \"stub docker $*\"\nsleep ${DOCKER_STUB_SLEEP:-0}\nexit ${DOCKER_STUB_EXIT:-0}\n"
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Local git repo with a Dockerfile.
+	repoDir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "-A")
+	git("commit", "-qm", "init")
+
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	p := &models.Project{
+		Name: "app", RepoURL: "file://" + repoDir, Branch: "main",
+		DockerfilePath: "Dockerfile", ImageName: "app",
+	}
+	if err := database.CreateProject(p); err != nil {
+		t.Fatal(err)
+	}
+	b := &models.Build{ProjectID: p.ID, Status: models.StatusPending, CommitSHA: "manual", CommitMessage: "test"}
+	if err := database.CreateBuild(b); err != nil {
+		t.Fatal(err)
+	}
+
+	bus := logbus.New()
+	r := New(database, make(chan *models.Build), bus)
+	return &testEnv{db: database, bus: bus, r: r}, b
+}
+
+func TestRunBuildSuccessEmitsGrammar(t *testing.T) {
+	env, build := newTestEnv(t)
+
+	env.r.process(build) // synchronous: returns when the build finishes
+
+	got, err := env.db.GetBuild(build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != models.StatusSuccess {
+		t.Fatalf("status = %s, want success; log:\n%s", got.Status, got.Log)
+	}
+	if got.StartedAt == nil || got.FinishedAt == nil {
+		t.Errorf("timestamps missing: %+v", got)
+	}
+	for _, want := range []string{
+		"##[step:clone] Cloning file://",
+		"##[step:build] Building Docker image:",
+		"##[step:push] Pushing image:",
+		"BUILD SUCCESS",
+		"stub docker build --progress=plain",
+	} {
+		if !strings.Contains(got.Log, want) {
+			t.Errorf("log missing %q; log:\n%s", want, got.Log)
+		}
+	}
+	// Manual builds don't emit a checkout step.
+	if strings.Contains(got.Log, "##[step:checkout]") {
+		t.Error("manual build should not emit checkout sentinel")
+	}
+	// The bus topic must be closed (terminal) and mirror the DB log.
+	if env.bus.Live(build.ID) {
+		t.Error("bus topic still live after terminal status")
+	}
+	tail, _, ok := env.bus.LogTail(build.ID, 0)
+	if !ok || string(tail) != got.Log {
+		t.Errorf("bus buffer and DB log diverged (ok=%v, bus=%d bytes, db=%d bytes)", ok, len(tail), len(got.Log))
+	}
+}
+
+func TestRunBuildFailurePropagates(t *testing.T) {
+	env, build := newTestEnv(t)
+	t.Setenv("DOCKER_STUB_EXIT", "7")
+
+	env.r.process(build)
+
+	got, _ := env.db.GetBuild(build.ID)
+	if got.Status != models.StatusFailed {
+		t.Fatalf("status = %s, want failed", got.Status)
+	}
+	if !strings.Contains(got.Log, "[ERROR] Docker build failed") {
+		t.Errorf("log missing error marker:\n%s", got.Log)
+	}
+}
+
+// A build canceled while still queued must be skipped by the worker: the
+// claim fails and nothing runs.
+func TestCanceledWhileQueuedIsSkipped(t *testing.T) {
+	env, build := newTestEnv(t)
+
+	ok, err := env.db.CancelPendingBuild(build.ID)
+	if err != nil || !ok {
+		t.Fatalf("cancel pending: ok=%v err=%v", ok, err)
+	}
+	env.r.process(build)
+
+	got, _ := env.db.GetBuild(build.ID)
+	if got.Status != models.StatusCanceled {
+		t.Fatalf("status = %s, want canceled", got.Status)
+	}
+	if strings.Contains(got.Log, "Starting build") {
+		t.Errorf("canceled build was executed:\n%s", got.Log)
+	}
+}
+
+// INVARIANT: the cancel registry is populated before ClaimBuild, so a cancel
+// arriving in that window still cancels the run. This mirrors process() with
+// the cancel injected at the worst possible moment.
+func TestCancelBetweenDequeueAndClaim(t *testing.T) {
+	env, build := newTestEnv(t)
+	r := env.r
+
+	ctx, cancelCause := context.WithCancelCause(r.ctx)
+	r.mu.Lock()
+	r.currentID = build.ID
+	r.cancelCurrent = cancelCause
+	r.mu.Unlock()
+
+	// User cancel lands after registration but before the claim.
+	if !r.Cancel(build.ID) {
+		t.Fatal("Cancel should reach the registered build")
+	}
+
+	claimed, err := r.DB.ClaimBuild(build.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim should still succeed: claimed=%v err=%v", claimed, err)
+	}
+	r.runBuild(ctx, build, time.Now().UTC())
+
+	got, _ := env.db.GetBuild(build.ID)
+	if got.Status != models.StatusCanceled {
+		t.Fatalf("status = %s, want canceled; log:\n%s", got.Status, got.Log)
+	}
+	if !strings.Contains(got.Log, "Build canceled by user") {
+		t.Errorf("log missing cancel marker:\n%s", got.Log)
+	}
+}
+
+func TestCancelDuringRun(t *testing.T) {
+	env, build := newTestEnv(t)
+	t.Setenv("DOCKER_STUB_SLEEP", "30")
+
+	done := make(chan struct{})
+	go func() {
+		env.r.process(build)
+		close(done)
+	}()
+
+	// Wait until the docker build step is underway (visible on the bus).
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		tail, _, _ := env.bus.LogTail(build.ID, 0)
+		if strings.Contains(string(tail), "##[step:build]") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("build step never started; log so far:\n%s", tail)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !env.r.Cancel(build.ID) {
+		t.Fatal("Cancel returned false for the running build")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("build did not stop after cancel")
+	}
+
+	got, _ := env.db.GetBuild(build.ID)
+	if got.Status != models.StatusCanceled {
+		t.Fatalf("status = %s, want canceled; log:\n%s", got.Status, got.Log)
+	}
+	if !strings.Contains(got.Log, "Build canceled by user") {
+		t.Errorf("log missing cancel marker:\n%s", got.Log)
+	}
+}
+
+func TestBuildTimeout(t *testing.T) {
+	env, build := newTestEnv(t)
+	t.Setenv("DOCKER_STUB_SLEEP", "30")
+	env.r.Timeout = 2 * time.Second
+
+	env.r.process(build)
+
+	got, _ := env.db.GetBuild(build.ID)
+	if got.Status != models.StatusFailed {
+		t.Fatalf("status = %s, want failed", got.Status)
+	}
+	if !strings.Contains(got.Log, "(build timed out)") {
+		t.Errorf("log missing timeout hint:\n%s", got.Log)
+	}
+}

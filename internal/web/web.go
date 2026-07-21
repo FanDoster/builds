@@ -6,9 +6,21 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/models"
 )
+
+// logText HTML-escapes log content and then encodes carriage returns as
+// &#13;. The HTML tokenizer normalizes raw \r to \n BEFORE entity decoding,
+// so this is the only way the client's CR-collapsing renderer can see the
+// real \r bytes in server-rendered log text.
+var tmplFuncs = template.FuncMap{
+	"logText": func(s string) template.HTML {
+		return template.HTML(strings.ReplaceAll(template.HTMLEscapeString(s), "\r", "&#13;"))
+	},
+}
 
 //go:embed templates/*.html
 var templateFS embed.FS
@@ -37,7 +49,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) render(w http.ResponseWriter, name string, data map[string]interface{}) {
-	tmpl, err := template.ParseFS(templateFS, "templates/base.html", "templates/"+name+".html")
+	tmpl, err := template.New(name).Funcs(tmplFuncs).ParseFS(templateFS, "templates/base.html", "templates/"+name+".html")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -102,8 +114,16 @@ func (h *Handler) handleBuild(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "build not found", 404)
 		return
 	}
+	// Project may be gone if deleted after the build; the page degrades.
+	project, _ := h.DB.GetProject(build.ProjectID)
+	queuePos := 0
+	if build.Status == models.StatusPending {
+		queuePos, _ = h.DB.QueuePosition(build.ID)
+	}
 	h.render(w, "build", map[string]interface{}{
-		"Title": build.ProjectName + " #" + strconv.FormatInt(build.ID, 10),
-		"Build": build,
+		"Title":    build.ProjectName + " #" + strconv.FormatInt(build.ID, 10),
+		"Build":    build,
+		"Project":  project,
+		"QueuePos": queuePos,
 	})
 }

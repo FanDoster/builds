@@ -7,20 +7,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/FanDoster/builds/internal/db"
+	"github.com/FanDoster/builds/internal/logbus"
 	"github.com/FanDoster/builds/internal/models"
 )
 
 // maxWebhookBody caps webhook payload reads (GitHub push payloads are far smaller).
 const maxWebhookBody = 1 << 20
 
+// BuildCanceler cancels the in-flight build (implemented by runner.Runner).
+type BuildCanceler interface {
+	Cancel(buildID int64) bool
+}
+
 type Server struct {
 	DB       *db.DB
 	BuildCh  chan *models.Build
+	Bus      *logbus.Bus
+	Runner   BuildCanceler
 	BasePath string // e.g. "/builds"
 }
 
@@ -51,8 +61,23 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/projects/{id}/builds", s.handleListProjectBuilds)
 	mux.HandleFunc("GET /api/builds", s.handleListRecentBuilds)
 	mux.HandleFunc("GET /api/builds/{id}", s.handleGetBuild)
+	mux.HandleFunc("GET /api/builds/{id}/events", s.handleBuildEvents)
+	mux.HandleFunc("GET /api/builds/{id}/log", s.handleBuildLog)
+	mux.HandleFunc("POST /api/builds/{id}/cancel", s.handleCancelBuild)
+	mux.HandleFunc("POST /api/builds/{id}/rerun", s.handleRerunBuild)
 
 	mux.HandleFunc("POST /api/webhook/github", s.handleGitHubWebhook)
+}
+
+// requireCsrf enforces the custom header on state-changing endpoints called
+// from the UI. A custom header can't be sent by a plain cross-site form and
+// forces a CORS preflight from scripts.
+func requireCsrf(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Builds-Csrf") != "1" {
+		writeError(w, 403, "missing X-Builds-Csrf header")
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -286,7 +311,264 @@ func (s *Server) handleGetBuild(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "build not found")
 		return
 	}
+	if r.URL.Query().Get("meta") == "1" {
+		build.LogLen = int64(len(build.Log))
+		// The live bus buffer can be ahead of the batched DB writes.
+		if _, cur, ok := s.Bus.LogTail(id, math.MaxInt); ok && int64(cur) > build.LogLen {
+			build.LogLen = int64(cur)
+		}
+		build.Log = ""
+		if build.Status == models.StatusPending {
+			if pos, err := s.DB.QueuePosition(id); err == nil {
+				build.QueuePosition = pos
+			}
+		}
+	}
 	writeJSON(w, 200, build)
+}
+
+// handleBuildLog serves the raw scrubbed log: full text, ?download=1
+// attachment, or ?offset=N incremental tail (the polling fallback for SSE).
+func (s *Server) handleBuildLog(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, 400, "invalid id")
+		return
+	}
+	build, err := s.DB.GetBuild(id)
+	if err != nil {
+		writeError(w, 404, "build not found")
+		return
+	}
+
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		offset, err = strconv.Atoi(v)
+		if err != nil || offset < 0 {
+			writeError(w, 400, "invalid offset")
+			return
+		}
+	}
+
+	// Prefer the live bus buffer (ahead of batched DB writes); fall back to
+	// the stored row for finished or pre-streaming builds.
+	body, total, ok := s.Bus.LogTail(id, offset)
+	if !ok || total == 0 {
+		full := build.Log
+		total = len(full)
+		if offset > total {
+			offset = total
+		}
+		body = []byte(full[offset:])
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Log-Offset", strconv.Itoa(total))
+	w.Header().Set("X-Build-Status", string(build.Status))
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s-build-%d.log", build.ProjectName, build.ID)))
+	}
+	w.WriteHeader(200)
+	w.Write(body)
+}
+
+// handleBuildEvents streams a build's log and status transitions over SSE.
+// Replay is race-free: Subscribe atomically returns the buffered bytes from
+// the resume offset plus a live channel.
+func (s *Server) handleBuildEvents(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, 400, "invalid id")
+		return
+	}
+	if _, err := s.DB.GetBuild(id); err != nil {
+		writeError(w, 404, "build not found")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, 500, "streaming unsupported")
+		return
+	}
+
+	// Resume offset: browser-set Last-Event-ID (auto-reconnect) wins over ?offset.
+	from := 0
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			from = n
+		}
+	} else if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			from = n
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+	fmt.Fprint(w, "retry: 2000\n\n")
+
+	writeStatus := func(status models.BuildStatus, startedAt, finishedAt *time.Time) {
+		data, _ := json.Marshal(map[string]interface{}{
+			"status":      status,
+			"started_at":  startedAt,
+			"finished_at": finishedAt,
+		})
+		fmt.Fprintf(w, "event: status\ndata: %s\n\n", data)
+	}
+	writeLog := func(chunk string, offset int) {
+		// JSON-wrapped so \r and \n inside the chunk survive SSE framing.
+		data, _ := json.Marshal(map[string]interface{}{"o": offset, "t": chunk})
+		fmt.Fprintf(w, "event: log\nid: %d\ndata: %s\n\n", offset, data)
+	}
+
+	// Subscribe before re-reading state so no transition can slip between.
+	snapshot, cur, ch, unsub := s.Bus.Subscribe(id, from)
+	defer unsub()
+
+	build, err := s.DB.GetBuild(id)
+	if err != nil {
+		return
+	}
+
+	// Replay: bus buffer when it has data, else the stored log (finished or
+	// pre-streaming builds whose topic buffer is empty).
+	replay, total := snapshot, cur
+	if cur == 0 && len(build.Log) > 0 {
+		f := from
+		if f > len(build.Log) {
+			f = len(build.Log)
+		}
+		replay, total = []byte(build.Log[f:]), len(build.Log)
+	}
+
+	writeStatus(build.Status, build.StartedAt, build.FinishedAt)
+	if len(replay) > 0 {
+		writeLog(string(replay), total)
+	}
+	flusher.Flush()
+	if build.Status.Terminal() {
+		return
+	}
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			// A named event (not an SSE comment) so the client-side
+			// stall watchdog can observe it.
+			fmt.Fprint(w, "event: ping\ndata: {}\n\n")
+			flusher.Flush()
+		case ev, open := <-ch:
+			if !open {
+				// Dropped as a slow subscriber or topic closed. Emit the
+				// final state if terminal; otherwise the client reconnects
+				// with Last-Event-ID and resumes.
+				if b, err := s.DB.GetBuild(id); err == nil && b.Status.Terminal() {
+					writeStatus(b.Status, b.StartedAt, b.FinishedAt)
+					flusher.Flush()
+				}
+				return
+			}
+			switch ev.Kind {
+			case "log":
+				writeLog(ev.Chunk, ev.Offset)
+			case "status":
+				writeStatus(ev.Status, ev.StartedAt, ev.FinishedAt)
+			}
+			flusher.Flush()
+			if ev.Kind == "status" && ev.Status.Terminal() {
+				return
+			}
+		}
+	}
+}
+
+// handleCancelBuild cancels a queued or running build. Race-safe against the
+// runner: the pending row is tombstoned atomically, and the runner registers
+// its cancel func before claiming — so a cancel always lands on one or the other.
+func (s *Server) handleCancelBuild(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, 400, "invalid id")
+		return
+	}
+
+	if ok, err := s.DB.CancelPendingBuild(id); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	} else if ok {
+		now := time.Now().UTC()
+		s.Bus.PublishStatus(id, models.StatusCanceled, nil, &now)
+		writeJSON(w, 200, map[string]interface{}{"id": id, "status": models.StatusCanceled})
+		return
+	}
+
+	if s.Runner != nil && s.Runner.Cancel(id) {
+		// The runner writes the terminal row; clients observe it via SSE.
+		writeJSON(w, 202, map[string]interface{}{"id": id, "status": "canceling"})
+		return
+	}
+
+	build, err := s.DB.GetBuild(id)
+	if err != nil {
+		writeError(w, 404, "build not found")
+		return
+	}
+	switch build.Status {
+	case models.StatusCanceled:
+		writeJSON(w, 200, map[string]interface{}{"id": id, "status": models.StatusCanceled, "already": true})
+	case models.StatusSuccess, models.StatusFailed:
+		writeError(w, 409, "build already finished")
+	default:
+		writeError(w, 409, "build could not be canceled, try again")
+	}
+}
+
+// handleRerunBuild creates a fresh build for the same project and ref.
+func (s *Server) handleRerunBuild(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, 400, "invalid id")
+		return
+	}
+	src, err := s.DB.GetBuild(id)
+	if err != nil {
+		writeError(w, 404, "build not found")
+		return
+	}
+	if _, err := s.DB.GetProject(src.ProjectID); err != nil {
+		writeError(w, 404, "project no longer exists")
+		return
+	}
+
+	build := &models.Build{
+		ProjectID:     src.ProjectID,
+		Status:        models.StatusPending,
+		CommitSHA:     src.CommitSHA,
+		CommitMessage: truncate(fmt.Sprintf("Re-run of #%d: %s", src.ID, src.CommitMessage), 100),
+	}
+	if err := s.DB.CreateBuild(build); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if !s.enqueue(build) {
+		writeError(w, 503, "build queue is full, try again later")
+		return
+	}
+	writeJSON(w, 201, build)
 }
 
 // --- GitHub Webhook ---

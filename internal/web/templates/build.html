@@ -1,28 +1,87 @@
 {{define "content"}}
-<div class="card-header" style="margin-bottom: 16px">
-  <div>
-    <h2 style="margin:0">{{.Build.ProjectName}} #{{.Build.ID}}</h2>
-    <div class="meta-row" style="margin-top:8px">
-      <span>{{.Build.CommitSHA}} — {{.Build.CommitMessage}}</span>
-    </div>
-    <div class="meta-row">
-      {{if .Build.StartedAt}}<span>Started: {{.Build.StartedAt.Format "Jan 02 15:04:05"}}</span>{{end}}
-      {{if .Build.FinishedAt}}<span>Finished: {{.Build.FinishedAt.Format "Jan 02 15:04:05"}}</span>{{end}}
-    </div>
-  </div>
-  <div>
-    <span class="badge badge-{{.Build.Status}}" style="font-size:14px">{{.Build.Status}}</span>
+<nav class="crumbs">
+  <a href="{{$.BasePath}}/projects/{{.Build.ProjectID}}">{{.Build.ProjectName}}</a>
+  <span class="crumbs-sep">/</span>
+  <span class="crumbs-cur">Build #{{.Build.ID}}</span>
+</nav>
+
+<div class="title-row">
+  <h1 class="build-title" id="build-title">Build #{{.Build.ID}}</h1>
+  <span id="status-chip" class="status-chip status-chip--{{.Build.Status}}"><span class="status-chip-icon"></span>{{.Build.Status}}</span>
+  <div class="actions">
+    <button id="btn-cancel" class="btn btn-danger" {{if not (or (eq .Build.Status "pending") (eq .Build.Status "running"))}}hidden{{end}}>Cancel</button>
+    <button id="btn-rerun" class="btn btn-primary" {{if or (eq .Build.Status "pending") (eq .Build.Status "running")}}hidden{{end}} title="Re-runs build the ref as it exists now">Re-run</button>
+    <a class="btn btn-quiet" href="{{$.BasePath}}/api/builds/{{.Build.ID}}/log?download=1">Download log</a>
+    <a class="btn btn-quiet" href="{{$.BasePath}}/api/builds/{{.Build.ID}}/log" target="_blank">Raw</a>
+    <a class="btn btn-quiet" href="{{$.BasePath}}/api/builds/{{.Build.ID}}" target="_blank">JSON</a>
   </div>
 </div>
 
-<div class="btn-group" style="margin-bottom: 16px">
-  <a href="{{$.BasePath}}/projects/{{.Build.ProjectID}}" class="btn">← Back to project</a>
-  <a href="{{$.BasePath}}/api/builds/{{.Build.ID}}" class="btn">JSON</a>
+<div class="commit-row">
+  {{if ne .Build.CommitSHA "manual"}}
+  <button id="sha-chip" class="sha-chip" data-sha="{{.Build.CommitSHA}}" title="Copy full SHA">{{printf "%.7s" .Build.CommitSHA}}</button>
+  {{end}}
+  <span class="commit-msg" title="{{.Build.CommitMessage}}">{{.Build.CommitMessage}}</span>
 </div>
 
-<h2>Build Log</h2>
-<div class="log-viewer" id="build-log"
-     data-build-id="{{.Build.ID}}"
-     data-api-url="{{$.BasePath}}/api/builds/{{.Build.ID}}"
-     data-status="{{.Build.Status}}">{{.Build.Log}}</div>
+<div class="meta-grid">
+  <div class="meta-cell">
+    <div class="meta-label">Trigger</div>
+    <div class="meta-value">{{if eq .Build.CommitSHA "manual"}}Manual{{else}}Webhook push{{end}}</div>
+  </div>
+  <div class="meta-cell">
+    <div class="meta-label">Started</div>
+    <div class="meta-value"><time id="meta-started" data-rel datetime="{{if .Build.StartedAt}}{{.Build.StartedAt.Format "2006-01-02T15:04:05Z07:00"}}{{end}}">{{if .Build.StartedAt}}{{.Build.StartedAt.Format "Jan 02 15:04"}}{{else}}—{{end}}</time></div>
+  </div>
+  <div class="meta-cell">
+    <div class="meta-label">Duration</div>
+    <div class="meta-value meta-duration" id="meta-duration">{{if .Build.Duration}}{{.Build.Duration}}{{else}}—{{end}}</div>
+  </div>
+  <div class="meta-cell">
+    <div class="meta-label">Image</div>
+    <div class="meta-value mono" title="{{if .Project}}{{.Project.ImageName}}{{end}}">{{if .Project}}{{.Project.ImageName}}{{else}}—{{end}}</div>
+  </div>
+</div>
+
+<div id="failure-callout"></div>
+
+<nav class="steps" id="steps" hidden></nav>
+
+<section class="log-viewer" id="build-log"
+  data-build-id="{{.Build.ID}}"
+  data-status="{{.Build.Status}}"
+  data-api-url="{{$.BasePath}}/api/builds/{{.Build.ID}}"
+  data-events-url="{{$.BasePath}}/api/builds/{{.Build.ID}}/events"
+  data-log-url="{{$.BasePath}}/api/builds/{{.Build.ID}}/log"
+  data-cancel-url="{{$.BasePath}}/api/builds/{{.Build.ID}}/cancel"
+  data-rerun-url="{{$.BasePath}}/api/builds/{{.Build.ID}}/rerun"
+  data-build-page-base="{{$.BasePath}}/builds/"
+  data-log-len="{{len .Build.Log}}"
+  data-queue-pos="{{.QueuePos}}"
+  data-project-name="{{.Build.ProjectName}}"
+  data-started-at="{{if .Build.StartedAt}}{{.Build.StartedAt.Format "2006-01-02T15:04:05Z07:00"}}{{end}}"
+  data-finished-at="{{if .Build.FinishedAt}}{{.Build.FinishedAt.Format "2006-01-02T15:04:05Z07:00"}}{{end}}"
+  data-created-at="{{.Build.CreatedAt.Format "2006-01-02T15:04:05Z07:00"}}">
+  <div class="log-toolbar">
+    <span class="log-title">Build log</span>
+    <span id="log-count" class="log-count"></span>
+    <span class="log-conn" id="log-conn" hidden></span>
+    <span class="spacer"></span>
+    <input id="log-search" class="log-search" type="search" placeholder="Search log" autocomplete="off" spellcheck="false">
+    <span id="search-count" class="search-count"></span>
+    <button id="tgl-follow" class="tgl" hidden>Follow</button>
+    <button id="tgl-wrap" class="tgl on">Wrap</button>
+    <button id="btn-copy" class="tgl">Copy</button>
+  </div>
+  <div id="log-trunc" class="log-trunc" hidden></div>
+  <div id="log-empty" class="log-empty" {{if ne .Build.Status "pending"}}hidden{{end}}>
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5V8l2.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <div class="log-empty-title">Queued</div>
+    <div class="log-empty-sub">Waiting for the runner — logs will stream automatically.</div>
+    <div class="log-empty-dots"><span></span><span></span><span></span></div>
+    <div class="log-empty-pos" id="queue-pos" {{if lt .QueuePos 2}}hidden{{end}}>Position in queue: <span id="queue-pos-n">{{.QueuePos}}</span></div>
+  </div>
+  <div class="log-body" id="log-body" tabindex="0">{{logText .Build.Log}}</div>
+  <button id="follow-pill" class="follow-pill" hidden>↓ Resume following</button>
+</section>
 {{end}}

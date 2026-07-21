@@ -5,11 +5,17 @@ import "time"
 type BuildStatus string
 
 const (
-	StatusPending BuildStatus = "pending"
-	StatusRunning BuildStatus = "running"
-	StatusSuccess BuildStatus = "success"
-	StatusFailed  BuildStatus = "failed"
+	StatusPending  BuildStatus = "pending"
+	StatusRunning  BuildStatus = "running"
+	StatusSuccess  BuildStatus = "success"
+	StatusFailed   BuildStatus = "failed"
+	StatusCanceled BuildStatus = "canceled"
 )
+
+// Terminal reports whether the status is a final state.
+func (s BuildStatus) Terminal() bool {
+	return s == StatusSuccess || s == StatusFailed || s == StatusCanceled
+}
 
 type Project struct {
 	ID                int64     `json:"id"`
@@ -43,6 +49,10 @@ type Build struct {
 	StartedAt     *time.Time  `json:"started_at"`
 	FinishedAt    *time.Time  `json:"finished_at"`
 	CreatedAt     time.Time   `json:"created_at"`
+
+	// Computed, never stored. Populated only for ?meta=1 API responses.
+	LogLen        int64 `json:"log_len,omitempty"`
+	QueuePosition int   `json:"queue_position,omitempty"`
 }
 
 // Duration returns a human-readable build duration, or "" if the build

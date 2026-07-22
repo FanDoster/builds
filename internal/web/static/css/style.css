@@ -509,3 +509,47 @@ h2 { font-size: 20px; margin-bottom: 16px; }
     opacity: 0.35;
   }
 }
+
+/* Settings page */
+.settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 16px;
+  max-width: 720px;
+}
+.settings-heading { font-size: 15px; font-weight: 600; color: var(--text-bright); margin-bottom: 14px; }
+.form-hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.45; }
+.form-hint .mono, .form-check .mono { font-family: var(--font-mono); font-size: 11px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+@media (max-width: 700px) { .form-row { grid-template-columns: 1fr; } }
+
+.form-check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; margin-top: 4px; }
+.form-check input { margin-top: 3px; accent-color: var(--accent); }
+.form-check-title { font-size: 14px; color: var(--text); display: block; }
+.form-check--inline { margin-top: 8px; }
+.form-check--inline span { font-size: 13px; color: var(--text-muted); }
+
+.secret-state {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); background: rgba(139,148,158,0.15);
+  padding: 1px 7px; border-radius: 999px; margin-left: 6px;
+}
+.secret-state--set { color: var(--green); background: rgba(63,185,80,0.15); }
+
+.save-row { display: flex; gap: 10px; align-items: center; margin: 4px 0 28px; max-width: 720px; }
+
+.form-banner {
+  max-width: 720px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 16px;
+  border: 1px solid transparent;
+}
+.form-banner--ok { background: rgba(63,185,80,0.1); border-color: rgba(63,185,80,0.35); color: var(--green); }
+.form-banner--err { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.35); color: var(--red); }
+
+.settings-card--danger { border-color: rgba(248,81,73,0.4); }
+.danger-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }

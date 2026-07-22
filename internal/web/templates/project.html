@@ -13,7 +13,10 @@
     <div class="meta" style="margin-top:4px">Deploy: docker compose -f {{.Project.DeployComposePath}} up -d {{.Project.DeployServiceName}}</div>
     {{end}}
   </div>
-  <button class="btn btn-primary" id="trigger-build" data-url="{{$.BasePath}}/api/projects/{{.Project.ID}}/build">Build</button>
+  <div class="btn-group">
+    <a class="btn" href="{{$.BasePath}}/projects/{{.Project.ID}}/settings">Settings</a>
+    <button class="btn btn-primary" id="trigger-build" data-url="{{$.BasePath}}/api/projects/{{.Project.ID}}/build">Build</button>
+  </div>
 </div>
 
 <h2>Build History</h2>

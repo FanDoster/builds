@@ -1,0 +1,112 @@
+{{define "content"}}
+<nav class="crumbs">
+  <a href="{{$.BasePath}}/projects/{{.Project.ID}}">{{.Project.Name}}</a>
+  <span class="crumbs-sep">/</span>
+  <span class="crumbs-cur">Settings</span>
+</nav>
+
+<div class="title-row">
+  <h1 class="build-title">Project settings</h1>
+</div>
+
+<div id="settings-banner" class="form-banner" hidden></div>
+
+<form id="settings-form"
+  data-api-url="{{$.BasePath}}/api/projects/{{.Project.ID}}"
+  data-project-url="{{$.BasePath}}/projects/{{.Project.ID}}"
+  data-home-url="{{$.BasePath}}/"
+  data-project-name="{{.Project.Name}}">
+
+  <section class="settings-card">
+    <h2 class="settings-heading">General</h2>
+    <div class="form-group">
+      <label for="f-name">Project name</label>
+      <input id="f-name" name="name" value="{{.Project.Name}}" required>
+    </div>
+    <div class="form-group">
+      <label for="f-repo">Repository URL</label>
+      <input id="f-repo" name="repo_url" value="{{.Project.RepoURL}}" required spellcheck="false">
+      <p class="form-hint">HTTPS clone URL. Webhook pushes are matched against this.</p>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="f-branch">Branch</label>
+        <input id="f-branch" name="branch" value="{{.Project.Branch}}" required spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="f-dockerfile">Dockerfile path</label>
+        <input id="f-dockerfile" name="dockerfile_path" value="{{.Project.DockerfilePath}}" required spellcheck="false">
+        <p class="form-hint">Relative to the repository root.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <h2 class="settings-heading">Build</h2>
+    <div class="form-group">
+      <label for="f-image">Image name</label>
+      <input id="f-image" name="image_name" value="{{.Project.ImageName}}" required spellcheck="false">
+      <p class="form-hint">Pushed as <span class="mono">registry.fandoster.com/&lt;image&gt;:latest</span>.</p>
+    </div>
+    <label class="form-check">
+      <input type="checkbox" name="no_cache" {{if .Project.NoCache}}checked{{end}}>
+      <span>
+        <span class="form-check-title">Disable Docker layer cache (<span class="mono">--no-cache</span>)</span>
+        <span class="form-hint">Every build starts clean. Slower, but immune to stale-layer surprises.</span>
+      </span>
+    </label>
+  </section>
+
+  <section class="settings-card">
+    <h2 class="settings-heading">Deploy</h2>
+    <p class="form-hint" style="margin-bottom:12px">Optional. After a successful push, run <span class="mono">docker compose -f &lt;file&gt; up -d &lt;service&gt;</span>. Leave both blank to let Watchtower (or nothing) handle deployment.</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="f-compose">Compose file path</label>
+        <input id="f-compose" name="deploy_compose_path" value="{{.Project.DeployComposePath}}" placeholder="/opt/docker/app/docker-compose.yml" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="f-service">Service name</label>
+        <input id="f-service" name="deploy_service_name" value="{{.Project.DeployServiceName}}" placeholder="web" spellcheck="false">
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card">
+    <h2 class="settings-heading">Secrets</h2>
+    <p class="form-hint" style="margin-bottom:12px">Write-only: current values are never shown. Leave a field blank to keep the existing value.</p>
+    <div class="form-group">
+      <label for="f-webhook">Webhook secret
+        {{if .HasWebhookSecret}}<span class="secret-state secret-state--set">set</span>{{else}}<span class="secret-state">not set</span>{{end}}
+      </label>
+      <input id="f-webhook" name="webhook_secret" type="password" autocomplete="new-password" placeholder="{{if .HasWebhookSecret}}unchanged{{else}}e.g. a long random string{{end}}">
+      <p class="form-hint">Validates GitHub <span class="mono">X-Hub-Signature-256</span> on push webhooks. Without one, unsigned pushes are accepted.</p>
+      {{if .HasWebhookSecret}}<label class="form-check form-check--inline"><input type="checkbox" id="clear-webhook"><span>Remove the webhook secret</span></label>{{end}}
+    </div>
+    <div class="form-group">
+      <label for="f-token">Clone token
+        {{if .HasCloneToken}}<span class="secret-state secret-state--set">set</span>{{else}}<span class="secret-state">not set</span>{{end}}
+      </label>
+      <input id="f-token" name="clone_token" type="password" autocomplete="new-password" placeholder="{{if .HasCloneToken}}unchanged{{else}}personal access token for private repos{{end}}">
+      <p class="form-hint">Injected into the clone URL for private repositories; scrubbed from all build logs.</p>
+      {{if .HasCloneToken}}<label class="form-check form-check--inline"><input type="checkbox" id="clear-token"><span>Remove the clone token</span></label>{{end}}
+    </div>
+  </section>
+
+  <div class="save-row">
+    <button type="submit" class="btn btn-primary" id="btn-save">Save settings</button>
+    <a class="btn btn-quiet" href="{{$.BasePath}}/projects/{{.Project.ID}}">Cancel</a>
+  </div>
+</form>
+
+<section class="settings-card settings-card--danger">
+  <h2 class="settings-heading">Danger zone</h2>
+  <div class="danger-row">
+    <div>
+      <div class="form-check-title">Delete this project</div>
+      <p class="form-hint">Removes the project and its entire build history. The pushed images stay in the registry.</p>
+    </div>
+    <button type="button" class="btn btn-danger" id="btn-delete">Delete project</button>
+  </div>
+</section>
+{{end}}

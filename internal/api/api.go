@@ -105,6 +105,9 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
 	var p models.Project
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
@@ -151,6 +154,9 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, 400, "invalid id")
@@ -221,6 +227,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	if !requireCsrf(w, r) {
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, 400, "invalid id")

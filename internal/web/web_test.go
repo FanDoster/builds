@@ -78,3 +78,43 @@ func TestNotFoundAndBadIDs(t *testing.T) {
 		t.Errorf("bad build id: got %d, want 400", w.Code)
 	}
 }
+
+// The settings page renders every configurable field but never a secret value.
+func TestSettingsPageRendersWithoutSecretValues(t *testing.T) {
+	database, mux := setup(t)
+	p := &models.Project{
+		Name: "app", RepoURL: "https://github.com/u/app", Branch: "main",
+		DockerfilePath: "Dockerfile", ImageName: "app", NoCache: true,
+		WebhookSecret: "super-webhook-secret", CloneToken: "super-clone-token",
+	}
+	if err := database.CreateProject(p); err != nil {
+		t.Fatal(err)
+	}
+
+	w := get(t, mux, fmt.Sprintf("/projects/%d/settings", p.ID))
+	if w.Code != 200 {
+		t.Fatalf("settings: got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`name="name"`, `name="repo_url"`, `name="branch"`, `name="dockerfile_path"`,
+		`name="image_name"`, `name="no_cache"`, `name="deploy_compose_path"`,
+		`name="deploy_service_name"`, `name="webhook_secret"`, `name="clone_token"`,
+		"Danger zone", "clear-webhook", "clear-token",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page missing %q", want)
+		}
+	}
+	// no_cache checkbox reflects the stored value.
+	if !strings.Contains(body, `name="no_cache" checked`) {
+		t.Error("no_cache checkbox not checked for enabled project")
+	}
+	// Secret VALUES must never appear in the HTML.
+	if strings.Contains(body, "super-webhook-secret") || strings.Contains(body, "super-clone-token") {
+		t.Error("settings page leaked a secret value")
+	}
+	if w := get(t, mux, "/projects/999/settings"); w.Code != 404 {
+		t.Errorf("missing project settings: got %d, want 404", w.Code)
+	}
+}

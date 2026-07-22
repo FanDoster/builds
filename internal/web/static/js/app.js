@@ -12,7 +12,84 @@
     initTriggerButton();
     initBuildPage();
     initListLive();
+    initSettingsForm();
   });
+
+  // --- Project settings page ---
+  function initSettingsForm() {
+    var form = document.getElementById('settings-form');
+    if (!form) return;
+    var banner = document.getElementById('settings-banner');
+    var btnSave = document.getElementById('btn-save');
+    var btnDelete = document.getElementById('btn-delete');
+
+    function showBanner(kind, msg) {
+      banner.hidden = false;
+      banner.className = 'form-banner form-banner--' + kind;
+      banner.textContent = msg;
+      banner.scrollIntoView({ block: 'nearest' });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var f = form.elements;
+      var payload = {
+        name: f.name.value.trim(),
+        repo_url: f.repo_url.value.trim(),
+        branch: f.branch.value.trim(),
+        dockerfile_path: f.dockerfile_path.value.trim(),
+        image_name: f.image_name.value.trim(),
+        deploy_compose_path: f.deploy_compose_path.value.trim(),
+        deploy_service_name: f.deploy_service_name.value.trim(),
+        no_cache: f.no_cache.checked,
+      };
+      // Secrets are write-only: blank means "keep", the explicit clear
+      // checkbox sends an empty string, a typed value replaces.
+      var clearWebhook = document.getElementById('clear-webhook');
+      if (clearWebhook && clearWebhook.checked) payload.webhook_secret = '';
+      else if (f.webhook_secret.value) payload.webhook_secret = f.webhook_secret.value;
+      var clearToken = document.getElementById('clear-token');
+      if (clearToken && clearToken.checked) payload.clone_token = '';
+      else if (f.clone_token.value) payload.clone_token = f.clone_token.value;
+
+      btnSave.disabled = true;
+      btnSave.textContent = 'Saving…';
+      fetch(form.dataset.apiUrl, {
+        method: 'PUT',
+        headers: { 'X-Builds-Csrf': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+        .then(function (res) {
+          if (res.ok) {
+            showBanner('ok', 'Settings saved.');
+            // Reload so secret set/unset badges and the header reflect reality.
+            setTimeout(function () { location.reload(); }, 700);
+            return null;
+          }
+          return res.json().then(function (d) { throw new Error(d.error || ('HTTP ' + res.status)); });
+        })
+        .catch(function (err) {
+          showBanner('err', 'Save failed: ' + err.message);
+          btnSave.disabled = false;
+          btnSave.textContent = 'Save settings';
+        });
+    });
+
+    btnDelete.addEventListener('click', function () {
+      var name = form.dataset.projectName;
+      if (!confirm('Delete project "' + name + '" and its entire build history? This cannot be undone.')) return;
+      btnDelete.disabled = true;
+      fetch(form.dataset.apiUrl, { method: 'DELETE', headers: { 'X-Builds-Csrf': '1' } })
+        .then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          location.href = form.dataset.homeUrl;
+        })
+        .catch(function (err) {
+          showBanner('err', 'Delete failed: ' + err.message);
+          btnDelete.disabled = false;
+        });
+    });
+  }
 
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   function pad2(n) { return (n < 10 ? '0' : '') + n; }

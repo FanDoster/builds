@@ -45,6 +45,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Pages
 	mux.HandleFunc("GET /", h.handleIndex)
 	mux.HandleFunc("GET /projects/{id}", h.handleProject)
+	mux.HandleFunc("GET /projects/{id}/settings", h.handleProjectSettings)
 	mux.HandleFunc("GET /builds/{id}", h.handleBuild)
 }
 
@@ -100,6 +101,30 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request) {
 		"Title":   project.Name,
 		"Project": project,
 		"Builds":  builds,
+	})
+}
+
+func (h *Handler) handleProjectSettings(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+	project, err := h.DB.GetProject(id)
+	if err != nil {
+		http.Error(w, "project not found", 404)
+		return
+	}
+	// Secrets are write-only in the UI: the page learns whether one is set,
+	// never its value.
+	hasWebhookSecret := project.WebhookSecret != ""
+	hasCloneToken := project.CloneToken != ""
+	project.Sanitize()
+	h.render(w, "settings", map[string]interface{}{
+		"Title":            project.Name + " · Settings",
+		"Project":          project,
+		"HasWebhookSecret": hasWebhookSecret,
+		"HasCloneToken":    hasCloneToken,
 	})
 }
 

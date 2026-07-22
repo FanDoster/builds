@@ -800,3 +800,31 @@ func TestGetBuildMetaIncludesProgress(t *testing.T) {
 		t.Errorf("current_step = %q, want build", got.CurrentStep)
 	}
 }
+
+// Project create/update/delete are state-changing and must require the
+// CSRF header like every other mutating endpoint.
+func TestProjectCRUDRequiresCsrf(t *testing.T) {
+	s, mux := newTestServer(t)
+	p := createProject(t, s, models.Project{
+		Name: "app", RepoURL: "https://github.com/u/app", Branch: "main",
+		DockerfilePath: "Dockerfile", ImageName: "app",
+	})
+
+	cases := []struct{ method, path string }{
+		{"POST", "/api/projects"},
+		{"PUT", fmt.Sprintf("/api/projects/%d", p.ID)},
+		{"DELETE", fmt.Sprintf("/api/projects/%d", p.ID)},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, c.path, strings.NewReader("{}"))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Errorf("%s %s without csrf: got %d, want 403", c.method, c.path, w.Code)
+		}
+	}
+	// Project must have survived the rejected DELETE.
+	if _, err := s.DB.GetProject(p.ID); err != nil {
+		t.Error("project deleted despite missing csrf header")
+	}
+}

@@ -8,10 +8,33 @@
   'use strict';
 
   document.addEventListener('DOMContentLoaded', function () {
+    renderAbsTimes();
     initTriggerButton();
     initBuildPage();
     initListLive();
   });
+
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  // Render [data-abs] <time> elements (server emits UTC) in the viewer's
+  // local timezone. Same-year dates drop the year; the full timestamp goes
+  // in the title. Called once on load — history timestamps are immutable.
+  function renderAbsTimes() {
+    var now = new Date();
+    var els = document.querySelectorAll('time[data-abs]');
+    for (var i = 0; i < els.length; i++) {
+      var dt = els[i].getAttribute('datetime');
+      if (!dt) continue;
+      var d = new Date(dt);
+      if (isNaN(d.getTime())) continue;
+      var label = MONTHS[d.getMonth()] + ' ' + pad2(d.getDate()) + ' ' +
+        pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+      if (d.getFullYear() !== now.getFullYear()) label = d.getFullYear() + ' ' + label;
+      els[i].textContent = label;
+      els[i].title = d.toLocaleString();
+    }
+  }
 
   // Shared: compact duration like "40s" / "1m40s" / "1h05m".
   function fmtShort(sec) {

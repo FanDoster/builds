@@ -19,7 +19,7 @@
 <h2>Build History</h2>
 <table class="build-table">
   <thead>
-    <tr><th>#</th><th>Commit</th><th>Message</th><th>Status</th><th>Duration</th><th></th></tr>
+    <tr><th>#</th><th>Commit</th><th>Message</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr>
   </thead>
   <tbody>
     {{range .Builds}}
@@ -28,11 +28,12 @@
       <td class="meta">{{.CommitSHA}}</td>
       <td>{{.CommitMessage}}</td>
       <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+      <td class="meta"><time data-abs datetime="{{if .StartedAt}}{{.StartedAt.Format "2006-01-02T15:04:05Z07:00"}}{{else}}{{.CreatedAt.Format "2006-01-02T15:04:05Z07:00"}}{{end}}">{{if .StartedAt}}{{.StartedAt.Format "Jan 02 15:04"}}{{else}}{{.CreatedAt.Format "Jan 02 15:04"}}{{end}}</time></td>
       <td class="meta build-dur">{{.Duration}}</td>
       <td><a href="{{$.BasePath}}/builds/{{.ID}}" class="btn">Logs</a></td>
     </tr>
     {{else}}
-    <tr><td colspan="6" class="meta">No builds yet.</td></tr>
+    <tr><td colspan="7" class="meta">No builds yet.</td></tr>
     {{end}}
   </tbody>
 </table>

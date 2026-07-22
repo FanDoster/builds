@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 func openTestDB(t *testing.T) *DB {

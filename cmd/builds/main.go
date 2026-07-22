@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/FanDoster/builds/internal/api"
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/logbus"
-	"github.com/FanDoster/builds/internal/models"
-	"github.com/FanDoster/builds/internal/runner"
-	"github.com/FanDoster/builds/internal/web"
+	"github.com/FanDoster/Build-System/internal/api"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/logbus"
+	"github.com/FanDoster/Build-System/internal/models"
+	"github.com/FanDoster/Build-System/internal/runner"
+	"github.com/FanDoster/Build-System/internal/web"
 )
 
 func main() {

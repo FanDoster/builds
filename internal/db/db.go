@@ -9,7 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 type DB struct {

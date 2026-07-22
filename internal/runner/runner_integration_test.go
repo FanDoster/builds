@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/logbus"
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/logbus"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 // testEnv wires a Runner against a real temp DB, a real local git repo, and

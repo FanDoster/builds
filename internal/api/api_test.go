@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/logbus"
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/logbus"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 func newTestServer(t *testing.T) (*Server, *http.ServeMux) {

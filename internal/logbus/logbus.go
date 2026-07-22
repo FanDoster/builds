@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 // RetainAfterClose is how long a finished build's buffer stays available for

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 // logText HTML-escapes log content and then encodes carriage returns as
@@ -74,7 +74,7 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.render(w, "index", map[string]interface{}{
-		"Title":    "Builds",
+		"Title":    "Dashboard",
 		"Projects": projects,
 		"Builds":   builds,
 	})

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 func setup(t *testing.T) (*db.DB, *http.ServeMux) {

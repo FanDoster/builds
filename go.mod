@@ -1,4 +1,4 @@
-module github.com/FanDoster/builds
+module github.com/FanDoster/Build-System
 
 go 1.25.0
 

@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FanDoster/builds/internal/db"
-	"github.com/FanDoster/builds/internal/logbus"
-	"github.com/FanDoster/builds/internal/models"
+	"github.com/FanDoster/Build-System/internal/db"
+	"github.com/FanDoster/Build-System/internal/logbus"
+	"github.com/FanDoster/Build-System/internal/models"
 )
 
 // maxWebhookBody caps webhook payload reads (GitHub push payloads are far smaller).

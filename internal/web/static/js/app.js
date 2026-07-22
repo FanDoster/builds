@@ -1,4 +1,4 @@
-// Builds — client JS.
+// Build-System — client JS.
 // Build page: live SSE log streaming (offset-polling fallback), terminal-style
 // renderer (CR collapse, ANSI SGR, line numbers/anchors, follow mode, search),
 // step rail, in-place status updates, cancel/re-run actions.
@@ -708,7 +708,7 @@
         case 'failed': prefix = '✗ '; color = '#f85149'; break;
         case 'canceled': prefix = '⊘ '; break;
       }
-      document.title = prefix + baseTitle + ' — Builds';
+      document.title = prefix + baseTitle + ' — Build-System';
       if (color !== state.lastFavColor) {
         state.lastFavColor = color;
         var c = document.createElement('canvas');

@@ -174,6 +174,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		DeployServiceName *string `json:"deploy_service_name"`
 		WebhookSecret     *string `json:"webhook_secret"`
 		CloneToken        *string `json:"clone_token"`
+		NoCache           *bool   `json:"no_cache"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
@@ -205,6 +206,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	setIf(&existing.DeployServiceName, updates.DeployServiceName)
 	setIf(&existing.WebhookSecret, updates.WebhookSecret)
 	setIf(&existing.CloneToken, updates.CloneToken)
+	if updates.NoCache != nil {
+		existing.NoCache = *updates.NoCache
+	}
 
 	if err := s.DB.UpdateProject(existing); err != nil {
 		writeError(w, 500, err.Error())

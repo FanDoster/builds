@@ -55,6 +55,7 @@ func (d *DB) migrate() error {
 			deploy_service_name TEXT DEFAULT '',
 			webhook_secret TEXT NOT NULL DEFAULT '',
 			clone_token TEXT NOT NULL DEFAULT '',
+			no_cache INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
 			updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
 		);
@@ -73,6 +74,36 @@ func (d *DB) migrate() error {
 
 		CREATE INDEX IF NOT EXISTS idx_builds_project ON builds(project_id, created_at DESC);
 	`)
+	if err != nil {
+		return err
+	}
+	// Additive column migrations for DBs created before the column existed.
+	// CREATE TABLE IF NOT EXISTS never alters an existing table, so new
+	// columns must be added explicitly and idempotently.
+	return d.addColumnIfMissing("projects", "no_cache", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN only when the column is
+// absent, so migrate() stays idempotent across restarts.
+func (d *DB) addColumnIfMissing(table, column, decl string) error {
+	rows, err := d.conn.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = d.conn.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
 	return err
 }
 
@@ -82,10 +113,10 @@ func (d *DB) CreateProject(p *models.Project) error {
 	p.CreatedAt = time.Now().UTC()
 	p.UpdatedAt = p.CreatedAt
 	res, err := d.conn.Exec(
-		`INSERT INTO projects (name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO projects (name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, no_cache, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.RepoURL, p.Branch, p.DockerfilePath, p.ImageName,
-		p.DeployComposePath, p.DeployServiceName, p.WebhookSecret, p.CloneToken,
+		p.DeployComposePath, p.DeployServiceName, p.WebhookSecret, p.CloneToken, p.NoCache,
 		p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
@@ -98,10 +129,10 @@ func (d *DB) CreateProject(p *models.Project) error {
 func (d *DB) GetProject(id int64) (*models.Project, error) {
 	p := &models.Project{}
 	err := d.conn.QueryRow(
-		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, created_at, updated_at
+		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, no_cache, created_at, updated_at
 		 FROM projects WHERE id = ?`, id,
 	).Scan(&p.ID, &p.Name, &p.RepoURL, &p.Branch, &p.DockerfilePath, &p.ImageName,
-		&p.DeployComposePath, &p.DeployServiceName, &p.WebhookSecret, &p.CloneToken,
+		&p.DeployComposePath, &p.DeployServiceName, &p.WebhookSecret, &p.CloneToken, &p.NoCache,
 		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -112,10 +143,10 @@ func (d *DB) GetProject(id int64) (*models.Project, error) {
 func (d *DB) GetProjectByName(name string) (*models.Project, error) {
 	p := &models.Project{}
 	err := d.conn.QueryRow(
-		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, created_at, updated_at
+		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, webhook_secret, clone_token, no_cache, created_at, updated_at
 		 FROM projects WHERE name = ?`, name,
 	).Scan(&p.ID, &p.Name, &p.RepoURL, &p.Branch, &p.DockerfilePath, &p.ImageName,
-		&p.DeployComposePath, &p.DeployServiceName, &p.WebhookSecret, &p.CloneToken,
+		&p.DeployComposePath, &p.DeployServiceName, &p.WebhookSecret, &p.CloneToken, &p.NoCache,
 		&p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -125,7 +156,7 @@ func (d *DB) GetProjectByName(name string) (*models.Project, error) {
 
 func (d *DB) ListProjects() ([]models.Project, error) {
 	rows, err := d.conn.Query(
-		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, created_at, updated_at
+		`SELECT id, name, repo_url, branch, dockerfile_path, image_name, deploy_compose_path, deploy_service_name, no_cache, created_at, updated_at
 		 FROM projects ORDER BY name`,
 	)
 	if err != nil {
@@ -137,7 +168,7 @@ func (d *DB) ListProjects() ([]models.Project, error) {
 	for rows.Next() {
 		var p models.Project
 		if err := rows.Scan(&p.ID, &p.Name, &p.RepoURL, &p.Branch, &p.DockerfilePath, &p.ImageName,
-			&p.DeployComposePath, &p.DeployServiceName, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.DeployComposePath, &p.DeployServiceName, &p.NoCache, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
@@ -149,10 +180,10 @@ func (d *DB) UpdateProject(p *models.Project) error {
 	p.UpdatedAt = time.Now().UTC()
 	_, err := d.conn.Exec(
 		`UPDATE projects SET name=?, repo_url=?, branch=?, dockerfile_path=?, image_name=?,
-		 deploy_compose_path=?, deploy_service_name=?, webhook_secret=?, clone_token=?, updated_at=?
+		 deploy_compose_path=?, deploy_service_name=?, webhook_secret=?, clone_token=?, no_cache=?, updated_at=?
 		 WHERE id=?`,
 		p.Name, p.RepoURL, p.Branch, p.DockerfilePath, p.ImageName,
-		p.DeployComposePath, p.DeployServiceName, p.WebhookSecret, p.CloneToken,
+		p.DeployComposePath, p.DeployServiceName, p.WebhookSecret, p.CloneToken, p.NoCache,
 		p.UpdatedAt, p.ID,
 	)
 	return err

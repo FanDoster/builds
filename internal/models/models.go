@@ -28,6 +28,7 @@ type Project struct {
 	DeployServiceName string    `json:"deploy_service_name,omitempty"`
 	WebhookSecret     string    `json:"webhook_secret,omitempty"`
 	CloneToken        string    `json:"clone_token,omitempty"`
+	NoCache           bool      `json:"no_cache"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

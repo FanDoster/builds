@@ -298,3 +298,38 @@ func TestJanitorSweepsStaleAndProgressReports(t *testing.T) {
 	env.r.Cancel(build.ID)
 	<-done
 }
+
+// The docker build command gets --no-cache exactly when the project opts in.
+// The stub docker echoes its args into the log, so we can assert on them.
+func TestNoCacheFlagPassedWhenEnabled(t *testing.T) {
+	for _, noCache := range []bool{false, true} {
+		env, build := newTestEnv(t)
+		p, _ := env.db.GetProject(build.ProjectID)
+		p.NoCache = noCache
+		if err := env.db.UpdateProject(p); err != nil {
+			t.Fatal(err)
+		}
+
+		env.r.process(build)
+
+		got, _ := env.db.GetBuild(build.ID)
+		if got.Status != models.StatusSuccess {
+			t.Fatalf("noCache=%v: status=%s log:\n%s", noCache, got.Status, got.Log)
+		}
+		hasFlag := strings.Contains(got.Log, "docker build --no-cache") ||
+			strings.Contains(got.Log, "build -t") && strings.Contains(got.Log, "--no-cache")
+		if hasFlag != noCache {
+			t.Errorf("noCache=%v but --no-cache present=%v; build line:\n%s",
+				noCache, hasFlag, firstLineContaining(got.Log, "stub docker build"))
+		}
+	}
+}
+
+func firstLineContaining(log, sub string) string {
+	for _, ln := range strings.Split(log, "\n") {
+		if strings.Contains(ln, sub) {
+			return ln
+		}
+	}
+	return "(no matching line)"
+}

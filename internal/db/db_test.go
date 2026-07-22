@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -257,4 +258,88 @@ func TestExpectedDuration(t *testing.T) {
 	if !ok || got != 45*time.Second {
 		t.Errorf("expected duration = %v ok=%v, want 45s", got, ok)
 	}
+}
+
+func TestProjectNoCacheRoundtripAndMigration(t *testing.T) {
+	d := openTestDB(t)
+
+	// Default is false.
+	p := &models.Project{
+		Name: "app", RepoURL: "https://x", Branch: "main",
+		DockerfilePath: "Dockerfile", ImageName: "app",
+	}
+	if err := d.CreateProject(p); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.GetProject(p.ID)
+	if got.NoCache {
+		t.Error("no_cache should default to false")
+	}
+
+	// Toggle on, verify via Get, GetByName, and List.
+	got.NoCache = true
+	if err := d.UpdateProject(got); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := d.GetProject(p.ID); !g.NoCache {
+		t.Error("no_cache not persisted via GetProject")
+	}
+	if g, _ := d.GetProjectByName("app"); !g.NoCache {
+		t.Error("no_cache not returned by GetProjectByName")
+	}
+	list, _ := d.ListProjects()
+	if len(list) != 1 || !list[0].NoCache {
+		t.Errorf("no_cache not returned by ListProjects: %+v", list)
+	}
+}
+
+// migrate() must add no_cache to a DB created without it, without clobbering
+// existing rows.
+func TestMigrationAddsNoCacheColumn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.db")
+
+	// Build a pre-migration schema: projects table with no no_cache column.
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE projects (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE, repo_url TEXT NOT NULL,
+		branch TEXT NOT NULL DEFAULT 'main', dockerfile_path TEXT NOT NULL DEFAULT 'Dockerfile',
+		image_name TEXT NOT NULL, deploy_compose_path TEXT DEFAULT '',
+		deploy_service_name TEXT DEFAULT '', webhook_secret TEXT NOT NULL DEFAULT '',
+		clone_token TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+		updated_at DATETIME NOT NULL DEFAULT (datetime('now')));`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO projects (name, repo_url, image_name) VALUES ('legacy','https://x','img')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	// Open through the normal path — migrate() must add the column.
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("open/migrate legacy db: %v", err)
+	}
+	defer d.Close()
+
+	got, err := d.GetProjectByName("legacy")
+	if err != nil {
+		t.Fatalf("legacy row unreadable after migration: %v", err)
+	}
+	if got.NoCache {
+		t.Error("migrated column should default to false")
+	}
+	// Idempotent: opening again must not error on a duplicate column.
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second open (idempotent migration) failed: %v", err)
+	}
+	d2.Close()
 }

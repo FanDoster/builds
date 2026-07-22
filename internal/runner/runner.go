@@ -281,8 +281,17 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 	// No --progress flag: legacy (non-BuildKit) docker rejects it with exit
 	// 125, and BuildKit already falls back to plain progress when stdout is
 	// not a TTY — which a pipe to the log sink never is.
+	buildArgs := []string{"build", "-t", imageTag, "-f", dockerfile}
+	if project.NoCache {
+		// Force a clean rebuild — bypasses Docker's layer cache, which can
+		// otherwise serve a stale image when a content change slips past its
+		// cache heuristics.
+		buildArgs = append(buildArgs, "--no-cache")
+	}
+	buildArgs = append(buildArgs, workDir)
+
 	stepStart("build", "Building Docker image: "+imageTag)
-	buildCmd := newCmd(ctx, sink, "docker", "build", "-t", imageTag, "-f", dockerfile, workDir)
+	buildCmd := newCmd(ctx, sink, "docker", buildArgs...)
 	if err := buildCmd.Run(); err != nil {
 		fail(fmt.Sprintf("Docker build failed: %v%s", err, timeoutHint(ctx)))
 		return

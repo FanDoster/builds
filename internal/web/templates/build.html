@@ -43,6 +43,10 @@
   </div>
 </div>
 
+<div class="build-progress" id="build-progress" role="progressbar" aria-label="Build progress" {{if ne .Build.Status "running"}}hidden{{end}}>
+  <div class="build-progress-fill" id="build-progress-fill"></div>
+</div>
+
 <div id="failure-callout"></div>
 
 <nav class="steps" id="steps" hidden></nav>

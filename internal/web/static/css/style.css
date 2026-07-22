@@ -442,3 +442,70 @@ h2 { font-size: 20px; margin-bottom: 16px; }
 @media (max-width: 700px) {
   .meta-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* Build progress bar */
+.build-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+  margin-bottom: 16px;
+  position: relative;
+}
+.build-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--orange);
+  border-radius: 3px;
+  transition: width 1s linear;
+}
+/* No estimate / overrun: honest indeterminate sweep instead of a fake % */
+.build-progress--indeterminate .build-progress-fill {
+  width: 30%;
+  transition: none;
+}
+
+/* Mini progress bar in live list rows */
+.mini-progress {
+  display: inline-block;
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(139,148,158,0.2);
+  overflow: hidden;
+  margin-right: 8px;
+  vertical-align: middle;
+  position: relative;
+}
+.mini-progress-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--orange);
+  border-radius: 2px;
+  transition: width 0.4s ease-out;
+}
+.mini-progress--indeterminate .mini-progress-fill {
+  width: 30%;
+  transition: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes progress-sweep {
+    0% { margin-left: -30%; }
+    100% { margin-left: 100%; }
+  }
+  .build-progress--indeterminate .build-progress-fill,
+  .mini-progress--indeterminate .mini-progress-fill {
+    animation: progress-sweep 1.4s ease-in-out infinite;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Static dim bar instead of the sweep */
+  .build-progress--indeterminate .build-progress-fill,
+  .mini-progress--indeterminate .mini-progress-fill {
+    width: 100%;
+    opacity: 0.35;
+  }
+}

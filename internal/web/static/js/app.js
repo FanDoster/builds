@@ -77,6 +77,25 @@
       el.dataset.status = status;
     }
 
+    // Tiny inline progress bar for a running row; indeterminate without an
+    // estimate or on a real overrun (same rules as the build page).
+    function miniProgress(elapsedSec, expectedSec) {
+      var wrap = document.createElement('span');
+      wrap.className = 'mini-progress';
+      var fill = document.createElement('span');
+      fill.className = 'mini-progress-fill';
+      var pct = expectedSec > 0 ? (elapsedSec / expectedSec) * 100 : -1;
+      if (pct >= 0 && pct <= 100) {
+        fill.style.width = pct.toFixed(1) + '%';
+      } else if (pct > 100 && pct <= 115) {
+        fill.style.width = '98%';
+      } else {
+        wrap.className += ' mini-progress--indeterminate';
+      }
+      wrap.appendChild(fill);
+      return wrap;
+    }
+
     function finalize(id, el) {
       fetch(base + '/api/builds/' + id + '?meta=1')
         .then(function (r) { return r.json(); })
@@ -110,7 +129,9 @@
               var elapsed = a.started_at ? (now - new Date(a.started_at).getTime()) / 1000 : 0;
               var txt = (a.current_step ? (STEP_NAMES[a.current_step] || a.current_step) + ' · ' : '') + fmtShort(elapsed);
               if (a.expected_secs) txt += ' / ~' + fmtShort(a.expected_secs);
-              d.textContent = txt;
+              d.textContent = '';
+              d.appendChild(miniProgress(elapsed, a.expected_secs));
+              d.appendChild(document.createTextNode(txt));
             } else {
               d.textContent = a.queue_position >= 2 ? 'queued · #' + a.queue_position : 'queued';
             }
@@ -172,6 +193,8 @@
     var followPill = document.getElementById('follow-pill');
     var metaDuration = document.getElementById('meta-duration');
     var metaStarted = document.getElementById('meta-started');
+    var progressBar = document.getElementById('build-progress');
+    var progressFill = document.getElementById('build-progress-fill');
     var queuePosEl = document.getElementById('queue-pos');
     var queuePosN = document.getElementById('queue-pos-n');
 
@@ -617,6 +640,33 @@
       }
     }
 
+    // Progress bar: fill toward the estimate while running. Honesty rules —
+    // hold at 98% on a slight overrun, switch to an indeterminate sweep when
+    // there is no estimate or the build is genuinely overrunning.
+    function updateProgress() {
+      if (!progressBar) return;
+      if (state.status !== 'running' || !state.startedAt) {
+        progressBar.hidden = true;
+        return;
+      }
+      progressBar.hidden = false;
+      var elapsed = (Date.now() - state.startedAt.getTime()) / 1000;
+      var pct = state.expectedSecs > 0 ? (elapsed / state.expectedSecs) * 100 : -1;
+      if (pct >= 0 && pct <= 100) {
+        progressBar.classList.remove('build-progress--indeterminate');
+        progressFill.style.width = pct.toFixed(1) + '%';
+        progressBar.setAttribute('aria-valuenow', String(Math.round(pct)));
+      } else if (pct > 100 && pct <= 115) {
+        progressBar.classList.remove('build-progress--indeterminate');
+        progressFill.style.width = '98%';
+        progressBar.setAttribute('aria-valuenow', '98');
+      } else {
+        progressBar.classList.add('build-progress--indeterminate');
+        progressFill.style.width = '';
+        progressBar.removeAttribute('aria-valuenow');
+      }
+    }
+
     // Pull the expected duration (mean of recent successful builds) once
     // per running phase; the ticker then renders elapsed vs expected.
     function fetchExpected() {
@@ -626,6 +676,7 @@
         .then(function (meta) {
           state.expectedSecs = meta.expected_secs || 0;
           updateDuration();
+          updateProgress();
         })
         .catch(function () {});
     }
@@ -635,6 +686,7 @@
       if (want && !state.ticker) {
         state.ticker = setInterval(function () {
           updateDuration();
+          updateProgress();
           updateTitleFavicon();
           if (state.steps.length) renderSteps();
         }, 1000);
@@ -705,6 +757,7 @@
         metaStarted.setAttribute('datetime', state.startedAt.toISOString());
       }
       updateDuration();
+      updateProgress();
       manageTicker();
       updateTitleFavicon();
       renderRelTimes();
@@ -1084,6 +1137,7 @@
     renderSteps();
     renderCallout();
     updateDuration();
+    updateProgress();
     manageTicker();
     updateTitleFavicon();
     renderRelTimes();

@@ -317,8 +317,13 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 			fail(err.Error())
 			return
 		}
-		stepStart("deploy", fmt.Sprintf("Deploying: docker compose -f %s up -d %s", project.DeployComposePath, project.DeployServiceName))
-		deployCmd := newCmd(ctx, sink, "docker", "compose", "-f", composePath, "up", "-d", "--pull", "always", project.DeployServiceName)
+		// --wait blocks until the recreated service is running AND (if it
+		// declares a healthcheck) healthy, so a crash-looping or unhealthy
+		// image fails the deploy step visibly instead of reporting success the
+		// moment the process starts. Services without a healthcheck still gate
+		// only on "running" — unchanged behavior for other projects.
+		stepStart("deploy", fmt.Sprintf("Deploying: docker compose -f %s up -d --wait %s", project.DeployComposePath, project.DeployServiceName))
+		deployCmd := newCmd(ctx, sink, "docker", "compose", "-f", composePath, "up", "-d", "--pull", "always", "--wait", "--wait-timeout", "120", project.DeployServiceName)
 		if err := deployCmd.Run(); err != nil {
 			fail(fmt.Sprintf("Deploy failed: %v%s", err, timeoutHint(ctx)))
 			return

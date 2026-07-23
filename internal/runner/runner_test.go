@@ -59,3 +59,36 @@ func TestResolveDockerfile(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveComposePath(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Absolute paths are server-managed and pass through verbatim.
+	for _, p := range []string{"/opt/docker/app/docker-compose.yml", "/etc/compose.yml"} {
+		got, err := resolveComposePath(workDir, p)
+		if err != nil {
+			t.Errorf("resolveComposePath(%q) unexpectedly rejected: %v", p, err)
+		}
+		if got != p {
+			t.Errorf("resolveComposePath(%q) = %q, want it unchanged", p, got)
+		}
+	}
+
+	// Relative paths resolve inside the repo checkout.
+	for _, p := range []string{"docker-compose.yml", "deploy/compose.yml", "./sub/../compose.yml"} {
+		got, err := resolveComposePath(workDir, p)
+		if err != nil {
+			t.Errorf("resolveComposePath(%q) unexpectedly rejected: %v", p, err)
+		}
+		if !strings.HasPrefix(got, workDir) {
+			t.Errorf("resolveComposePath(%q) = %q, want it under %q", p, got, workDir)
+		}
+	}
+
+	// Relative paths that escape the checkout are rejected.
+	for _, p := range []string{"../outside/compose.yml", "../../etc/compose.yml", "sub/../../escape.yml"} {
+		if _, err := resolveComposePath(workDir, p); err == nil {
+			t.Errorf("resolveComposePath(%q) should have been rejected", p)
+		}
+	}
+}

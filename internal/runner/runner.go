@@ -307,8 +307,18 @@ func (r *Runner) runBuild(ctx context.Context, build *models.Build, startedAt ti
 
 	// Step 4: Deploy (if configured)
 	if project.DeployComposePath != "" && project.DeployServiceName != "" {
+		// An absolute compose path is a server-managed file (an admin
+		// pre-places it, e.g. /opt/docker/<app>/docker-compose.yml). A
+		// relative path is resolved against the cloned repo, letting a
+		// project ship its own compose file and self-describe its deploy —
+		// rejected if it escapes the checkout (same guard as the Dockerfile).
+		composePath, err := resolveComposePath(workDir, project.DeployComposePath)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
 		stepStart("deploy", fmt.Sprintf("Deploying: docker compose -f %s up -d %s", project.DeployComposePath, project.DeployServiceName))
-		deployCmd := newCmd(ctx, sink, "docker", "compose", "-f", project.DeployComposePath, "up", "-d", "--pull", "always", project.DeployServiceName)
+		deployCmd := newCmd(ctx, sink, "docker", "compose", "-f", composePath, "up", "-d", "--pull", "always", project.DeployServiceName)
 		if err := deployCmd.Run(); err != nil {
 			fail(fmt.Sprintf("Deploy failed: %v%s", err, timeoutHint(ctx)))
 			return
@@ -353,6 +363,25 @@ func resolveDockerfile(workDir, path string) (string, error) {
 		return "", fmt.Errorf("dockerfile path %q escapes the repository checkout", path)
 	}
 	return dockerfile, nil
+}
+
+// resolveComposePath decides where the deploy step reads its compose file
+// from. An ABSOLUTE path is used as-is: a server-managed file an admin
+// pre-places on the box (the original behavior). A RELATIVE path is resolved
+// against the cloned repository so a project can ship its own compose file
+// in-repo — rejected if it escapes the checkout. The repo checkout still
+// exists at deploy time (its cleanup is deferred to build-function return,
+// which happens after the detached `compose up` returns).
+func resolveComposePath(workDir, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	compose := filepath.Join(workDir, path)
+	rel, err := filepath.Rel(workDir, compose)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("deploy compose path %q escapes the repository checkout", path)
+	}
+	return compose, nil
 }
 
 // injectToken adds a credential to an HTTP(S) clone URL, percent-encoding it

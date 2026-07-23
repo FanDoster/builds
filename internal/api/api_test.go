@@ -81,6 +81,28 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path string, body interfac
 	return w
 }
 
+// --- Health ---
+
+func TestHealthReportsVersion(t *testing.T) {
+	_, mux := newTestServer(t)
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("health status = %d, want 200", w.Code)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode health body: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Errorf("status = %q, want ok", got["status"])
+	}
+	if got["version"] != Version {
+		t.Errorf("version = %q, want %q", got["version"], Version)
+	}
+}
+
 // --- Projects ---
 
 func TestCreateProjectValidation(t *testing.T) {

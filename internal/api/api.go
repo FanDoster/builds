@@ -21,6 +21,11 @@ import (
 // maxWebhookBody caps webhook payload reads (GitHub push payloads are far smaller).
 const maxWebhookBody = 1 << 20
 
+// Version identifies the running build-server code. Bump it with any change
+// that ships; /api/health returns it so a self-deploy can be confirmed live
+// (the running container is only as new as the version it reports).
+const Version = "2026-07-23-repo-compose"
+
 // RunnerControl is the runner surface the API needs (implemented by
 // runner.Runner): canceling the in-flight build and reading its progress.
 type RunnerControl interface {
@@ -84,7 +89,7 @@ func requireCsrf(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]string{"status": "ok"})
+	writeJSON(w, 200, map[string]string{"status": "ok", "version": Version})
 }
 
 // --- Projects ---

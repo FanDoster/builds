@@ -1,8 +1,7 @@
 {{define "content"}}
-<h2>Projects</h2>
-
 <div class="grid-2">
   <div>
+    <h2>Projects</h2>
     {{range .Projects}}
     <div class="card">
       <div class="card-header">
@@ -22,7 +21,7 @@
   </div>
 
   <div>
-    <h2 style="margin-top:0">Recent Builds</h2>
+    <h2>Recent Builds</h2>
     {{range .Builds}}
     <div class="card" data-live-build="{{.ID}}" data-status="{{.Status}}">
       <div class="card-header">

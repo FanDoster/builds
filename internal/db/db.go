@@ -73,6 +73,11 @@ func (d *DB) migrate() error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_builds_project ON builds(project_id, created_at DESC);
+
+		CREATE TABLE IF NOT EXISTS app_settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
@@ -104,6 +109,26 @@ func (d *DB) addColumnIfMissing(table, column, decl string) error {
 		return err
 	}
 	_, err = d.conn.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+	return err
+}
+
+// --- App settings (key/value, e.g. the persisted session-signing secret) ---
+
+// GetSetting returns "" (no error) when the key does not exist.
+func (d *DB) GetSetting(key string) (string, error) {
+	var v string
+	err := d.conn.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+func (d *DB) SetSetting(key, value string) error {
+	_, err := d.conn.Exec(
+		`INSERT INTO app_settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value,
+	)
 	return err
 }
 

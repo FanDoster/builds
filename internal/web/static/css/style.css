@@ -553,3 +553,12 @@ h2 { font-size: 20px; margin-bottom: 16px; }
 
 .settings-card--danger { border-color: rgba(248,81,73,0.4); }
 .danger-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+/* Login */
+.login-wrap { display: flex; justify-content: center; padding-top: 8vh; }
+.login-card { width: 360px; max-width: 100%; }
+.nav-signout {
+  background: none; border: none; padding: 0;
+  color: var(--text-muted); font-size: 14px; font-family: inherit; cursor: pointer;
+}
+.nav-signout:hover { color: var(--text); }

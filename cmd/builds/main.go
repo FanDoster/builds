@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FanDoster/Build-System/internal/api"
+	"github.com/FanDoster/Build-System/internal/auth"
 	"github.com/FanDoster/Build-System/internal/db"
 	"github.com/FanDoster/Build-System/internal/logbus"
 	"github.com/FanDoster/Build-System/internal/models"
@@ -63,7 +64,19 @@ func main() {
 	webHandler := web.New(database, basePath)
 	webHandler.RegisterRoutes(mux)
 
-	server := &http.Server{Addr: addr, Handler: mux}
+	// Authentication: everything behind a password when one is configured.
+	authz, err := auth.New(database, os.Getenv("BUILDS_PASSWORD"), os.Getenv("BUILDS_PASSWORD_HASH"), basePath)
+	if err != nil {
+		log.Fatalf("Failed to initialise auth: %v", err)
+	}
+	if authz.Disabled() {
+		log.Println("WARNING: BUILDS_PASSWORD is not set — the UI and API are UNPROTECTED")
+	} else {
+		authz.RegisterRoutes(mux)
+		log.Println("Authentication enabled")
+	}
+
+	server := &http.Server{Addr: addr, Handler: authz.Middleware(mux)}
 
 	// Shut down cleanly on SIGINT/SIGTERM so in-flight builds are not left
 	// stuck in "running".

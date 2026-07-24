@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/FanDoster/Build-System/internal/auth"
 	"github.com/FanDoster/Build-System/internal/db"
 	"github.com/FanDoster/Build-System/internal/models"
 )
@@ -44,12 +45,24 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Pages
 	mux.HandleFunc("GET /", h.handleIndex)
+	mux.HandleFunc("GET /login", h.handleLogin)
 	mux.HandleFunc("GET /projects/{id}", h.handleProject)
 	mux.HandleFunc("GET /projects/{id}/settings", h.handleProjectSettings)
 	mux.HandleFunc("GET /builds/{id}", h.handleBuild)
 }
 
-func (h *Handler) render(w http.ResponseWriter, name string, data map[string]interface{}) {
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// Already signed in (or auth disabled)? The login page is pointless.
+	if auth.IsAuthed(r.Context()) {
+		http.Redirect(w, r, h.BasePath+"/", http.StatusFound)
+		return
+	}
+	h.render(w, r, "login", map[string]interface{}{
+		"Title": "Sign in",
+	})
+}
+
+func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
 	tmpl, err := template.New(name).Funcs(tmplFuncs).ParseFS(templateFS, "templates/base.html", "templates/"+name+".html")
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -59,6 +72,7 @@ func (h *Handler) render(w http.ResponseWriter, name string, data map[string]int
 		data = map[string]interface{}{}
 	}
 	data["BasePath"] = h.BasePath
+	data["Authed"] = auth.IsAuthed(r.Context())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl.ExecuteTemplate(w, "base", data)
 }
@@ -74,7 +88,7 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load builds: "+err.Error(), 500)
 		return
 	}
-	h.render(w, "index", map[string]interface{}{
+	h.render(w, r, "index", map[string]interface{}{
 		"Title":    "Dashboard",
 		"Projects": projects,
 		"Builds":   builds,
@@ -97,7 +111,7 @@ func (h *Handler) handleProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load builds: "+err.Error(), 500)
 		return
 	}
-	h.render(w, "project", map[string]interface{}{
+	h.render(w, r, "project", map[string]interface{}{
 		"Title":   project.Name,
 		"Project": project,
 		"Builds":  builds,
@@ -120,7 +134,7 @@ func (h *Handler) handleProjectSettings(w http.ResponseWriter, r *http.Request) 
 	hasWebhookSecret := project.WebhookSecret != ""
 	hasCloneToken := project.CloneToken != ""
 	project.Sanitize()
-	h.render(w, "settings", map[string]interface{}{
+	h.render(w, r, "settings", map[string]interface{}{
 		"Title":            project.Name + " · Settings",
 		"Project":          project,
 		"HasWebhookSecret": hasWebhookSecret,
@@ -145,7 +159,7 @@ func (h *Handler) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if build.Status == models.StatusPending {
 		queuePos, _ = h.DB.QueuePosition(build.ID)
 	}
-	h.render(w, "build", map[string]interface{}{
+	h.render(w, r, "build", map[string]interface{}{
 		"Title":    build.ProjectName + " #" + strconv.FormatInt(build.ID, 10),
 		"Build":    build,
 		"Project":  project,

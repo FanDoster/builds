@@ -13,7 +13,54 @@
     initBuildPage();
     initListLive();
     initSettingsForm();
+    initLoginForm();
+    initSignOut();
   });
+
+  // --- Login page ---
+  function initLoginForm() {
+    var form = document.getElementById('login-form');
+    if (!form) return;
+    var banner = document.getElementById('login-banner');
+    var btn = document.getElementById('btn-login');
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      btn.disabled = true;
+      fetch(form.dataset.apiUrl, {
+        method: 'POST',
+        headers: { 'X-Builds-Csrf': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: form.elements.password.value }),
+      })
+        .then(function (res) {
+          if (res.ok) {
+            var base = document.body.dataset.basePath || '';
+            var next = new URLSearchParams(location.search).get('next') || '/';
+            // Only same-site relative paths — never protocol-relative or absolute.
+            if (next.charAt(0) !== '/' || next.charAt(1) === '/') next = '/';
+            location.href = base + next;
+            return null;
+          }
+          return res.json().then(function (d) { throw new Error(d.error || ('HTTP ' + res.status)); });
+        })
+        .catch(function (err) {
+          banner.hidden = false;
+          banner.className = 'form-banner form-banner--err';
+          banner.textContent = err.message;
+          btn.disabled = false;
+          form.elements.password.select();
+        });
+    });
+  }
+
+  function initSignOut() {
+    var btn = document.getElementById('btn-signout');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      fetch(btn.dataset.url, { method: 'POST', headers: { 'X-Builds-Csrf': '1' } })
+        .then(function () { location.href = btn.dataset.loginUrl; })
+        .catch(function () { location.href = btn.dataset.loginUrl; });
+    });
+  }
 
   // --- Project settings page ---
   function initSettingsForm() {

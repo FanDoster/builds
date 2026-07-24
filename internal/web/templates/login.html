@@ -1,0 +1,13 @@
+{{define "content"}}
+<div class="login-wrap">
+  <form id="login-form" class="settings-card login-card" data-api-url="{{$.BasePath}}/api/login">
+    <h2 class="settings-heading">Sign in</h2>
+    <div id="login-banner" class="form-banner" hidden></div>
+    <div class="form-group">
+      <label for="f-password">Password</label>
+      <input id="f-password" name="password" type="password" autocomplete="current-password" autofocus required>
+    </div>
+    <button type="submit" class="btn btn-primary" id="btn-login" style="width:100%">Sign in</button>
+  </form>
+</div>
+{{end}}
